@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 )
 
 // ErrNoSemverTags reports that a source has no semver tags to resolve.
@@ -20,6 +22,13 @@ type ResolvedVersion struct {
 // ResolveVersion discovers tags for source and selects the highest tag matching constraint.
 // Empty constraint means "latest stable semver tag". "sha:<hex>" bypasses tag discovery.
 func ResolveVersion(source, constraint string) (ResolvedVersion, error) {
+	if builtinpacks.IsSource(source) {
+		version, commit, err := builtinpacks.ResolveCurrent(constraint, matchesConstraint)
+		if err != nil {
+			return ResolvedVersion{}, err
+		}
+		return ResolvedVersion{Version: version, Commit: commit}, nil
+	}
 	if strings.HasPrefix(constraint, "sha:") {
 		commit := strings.TrimPrefix(constraint, "sha:")
 		if commit == "" {

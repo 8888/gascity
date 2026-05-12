@@ -97,6 +97,33 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 	return lock, nil
 }
 
+// InstallLockedBundledPacks restores only bundled pack entries recorded in
+// packs.lock into the shared cache. It never fetches arbitrary remote imports.
+func InstallLockedBundledPacks(cityRoot string) (*Lockfile, error) {
+	lock, err := ReadLockfile(fsys.OSFS{}, cityRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	sources := make([]string, 0, len(lock.Packs))
+	for source := range lock.Packs {
+		if builtinpacks.IsSource(source) {
+			sources = append(sources, source)
+		}
+	}
+	sort.Strings(sources)
+	for _, source := range sources {
+		pack := lock.Packs[source]
+		if pack.Commit == "" {
+			return nil, fmt.Errorf("lock entry %q is missing commit", source)
+		}
+		if _, err := EnsureRepoInCache(source, pack.Commit); err != nil {
+			return nil, err
+		}
+	}
+	return lock, nil
+}
+
 // SyncLock resolves the reachable remote-import closure and returns the updated lock.
 func SyncLock(cityRoot string, imports map[string]config.Import, mode InstallMode) (*Lockfile, error) {
 	return syncLock(cityRoot, imports, mode, nil)

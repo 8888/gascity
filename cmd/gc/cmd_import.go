@@ -387,6 +387,9 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	if err != nil {
 		return nil, err
 	}
+	for name, imp := range cfg.Imports {
+		all["city:"+name] = imp
+	}
 	for _, rig := range cfg.Rigs {
 		for name, imp := range rig.Imports {
 			all["rig:"+rig.Name+":"+name] = imp

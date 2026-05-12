@@ -84,9 +84,6 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 }
 
 func effectiveCityName(cityPath string) (string, error) {
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		return "", fmt.Errorf("materializing builtin packs: %w", err)
-	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if err != nil {

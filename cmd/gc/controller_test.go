@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -2198,21 +2199,29 @@ func (osFS) Rename(oldpath, newpath string) error                 { return os.Re
 func (osFS) Remove(name string) error                             { return os.Remove(name) }
 
 // TestTryReloadConfig_IncludesBuiltinPackOrders verifies that the controller's
-// config reload path includes builtin pack formula layers so the order
-// dispatcher sees orders from all embedded packs (core, maintenance, bd, dolt).
-// Regression test for gc-4624: dolt pack orders never fired because
-// tryReloadConfig did not pass builtinPackIncludes to LoadWithIncludes.
+// config reload path sees orders from explicitly installed bundled defaults
+// (core, maintenance, bd, dolt).
 func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	configureTestDoltIdentityEnv(t)
 	t.Setenv("GC_BEADS", "")
 
 	dir := shortSocketTempDir(t, "gc-reload-orders-")
 	tomlPath := filepath.Join(dir, "city.toml")
+	cfg := config.DefaultCity("test")
+	config.AddDefaultBuiltinImports(&cfg, true, false)
+	packCfg, _ := splitInitConfig("test", &cfg)
+	packData, err := marshalInitPackConfig(packCfg)
+	if err != nil {
+		t.Fatalf("marshal pack config: %v", err)
+	}
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), packData, 0o644); err != nil {
 		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := installInitImportsIfNeeded(fsys.OSFS{}, dir); err != nil {
+		t.Fatalf("install bundled imports: %v", err)
 	}
 
 	result, err := tryReloadConfig(tomlPath, "test", dir)

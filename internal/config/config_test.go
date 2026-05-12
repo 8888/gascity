@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -83,7 +84,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[imports]\n[imports.core]\nsource = \"https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core\"\n[imports.maintenance]\nsource = \"https://github.com/gastownhall/gascity.git//examples/gastown/packs/maintenance\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -862,11 +863,13 @@ func TestGastownCity(t *testing.T) {
 	if c.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", c.Workspace.Provider, "claude")
 	}
-	if len(c.Imports) != 1 || c.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("Imports = %v, want gastown=.gc/system/packs/gastown", c.Imports)
+	if len(c.Imports) != 2 ||
+		c.Imports["core"].Source != builtinpacks.MustSource("core") ||
+		c.Imports["gastown"].Source != builtinpacks.MustSource("gastown") {
+		t.Errorf("Imports = %v, want core and gastown bundled imports", c.Imports)
 	}
-	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("DefaultRigImports = %v, want gastown=.gc/system/packs/gastown", c.DefaultRigImports)
+	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != builtinpacks.MustSource("gastown") {
+		t.Errorf("DefaultRigImports = %v, want gastown bundled import", c.DefaultRigImports)
 	}
 	if len(c.Workspace.GlobalFragments) != 2 {
 		t.Errorf("Workspace.GlobalFragments = %v, want 2 entries", c.Workspace.GlobalFragments)
@@ -914,8 +917,10 @@ func TestGastownCityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if len(got.Imports) != 1 || got.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("round-trip Imports = %v, want gastown=.gc/system/packs/gastown", got.Imports)
+	if len(got.Imports) != 2 ||
+		got.Imports["core"].Source != builtinpacks.MustSource("core") ||
+		got.Imports["gastown"].Source != builtinpacks.MustSource("gastown") {
+		t.Errorf("round-trip Imports = %v, want core and gastown bundled imports", got.Imports)
 	}
 	if got.Workspace.Provider != "claude" {
 		t.Errorf("round-trip Provider = %q, want %q", got.Workspace.Provider, "claude")

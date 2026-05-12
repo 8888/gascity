@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -787,6 +788,58 @@ fetched = "2026-04-10T00:00:00Z"
 	}
 	if !strings.Contains(err.Error(), "locked but not cached") || !strings.Contains(err.Error(), `run "gc import install"`) {
 		t.Fatalf("error = %v, want locked-but-not-cached install hint", err)
+	}
+}
+
+func TestImport_BundledRemoteImportInvalidSyntheticCacheReportsValidationError(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	source := builtinpacks.MustSource("bd")
+	commit := "synthetic-stale"
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, commit))
+	mustMkdirAll(t, cacheDir, 0o755)
+	writeTestFile(t, cacheDir, ".gc-bundled-pack-cache.toml", fmt.Sprintf(`
+schema = 1
+repository = %q
+commit = %q
+content_hash = "sha256:stale"
+`, builtinpacks.Repository, commit))
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", fmt.Sprintf(`
+[pack]
+name = "test"
+schema = 1
+
+[imports.bd]
+source = %q
+version = "sha:%s"
+`, source, commit))
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "sha:%s"
+commit = %q
+fetched = "2026-04-10T00:00:00Z"
+`, source, commit, commit))
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected invalid synthetic cache error")
+	}
+	if !strings.Contains(err.Error(), "synthetic cache is invalid") ||
+		!strings.Contains(err.Error(), "bundled pack cache content hash") ||
+		strings.Contains(err.Error(), "locked but not cached") {
+		t.Fatalf("error = %v, want synthetic validation error without locked-but-not-cached fallback", err)
 	}
 }
 

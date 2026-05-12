@@ -396,9 +396,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
 	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
-		t.Fatalf("write initial city.toml: %v", err)
-	}
+	writeCityConfigForReloadTest(t, cityDir, config.DefaultCity("test"))
 
 	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
 	if err != nil {
@@ -408,10 +406,9 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
 
 	rigDir := t.TempDir()
-	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir)
-	if err := os.WriteFile(tomlPath, []byte(updatedToml), 0o644); err != nil {
-		t.Fatalf("write updated city.toml: %v", err)
-	}
+	updatedCfg := config.DefaultCity("test")
+	updatedCfg.Rigs = []config.Rig{{Name: "alpha", Path: rigDir}}
+	writeCityConfigForReloadTest(t, cityDir, updatedCfg)
 	reloaded, err := tryReloadConfig(tomlPath, "test", cityDir)
 	if err != nil {
 		t.Fatalf("reloaded tryReloadConfig: %v", err)
@@ -434,9 +431,7 @@ func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *tes
 	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
 	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
+	writeCityConfigForReloadTest(t, cityDir, config.DefaultCity("test"))
 
 	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
 	if err != nil {
@@ -464,6 +459,20 @@ func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *tes
 		t.Fatal("pending mutation marker was not cleared by matching runtime update")
 	}
 	requireControllerStateOrder(t, cs, "gate-sweep")
+}
+
+func writeCityConfigForReloadTest(t *testing.T, cityDir string, cfg config.City) {
+	t.Helper()
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal city config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := installInitImportsIfNeeded(fsys.OSFS{}, cityDir); err != nil {
+		t.Fatalf("install bundled imports: %v", err)
+	}
 }
 
 func requireControllerStateOrder(t *testing.T, cs *controllerState, want string) {

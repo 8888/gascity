@@ -30,15 +30,29 @@ Describe what this agent should do here.
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	extras, err := builtinPackIncludesForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
-	if err != nil {
-		return nil, err
-	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extras...)
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		return nil, err
 	}
 	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
+	applyFeatureFlags(cfg)
+	return cfg, nil
+}
+
+// loadCityConfigSuppressDeprecatedOrderWarnings performs a full config load
+// while suppressing only legacy order-path migration warnings.
+func loadCityConfigSuppressDeprecatedOrderWarnings(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	resolvedWarningWriter := resolveLoadCityConfigWarningWriter(warningWriter...)
+	cfg, prov, err := config.LoadWithIncludesOptions(
+		fsys.OSFS{},
+		tomlPath,
+		config.LoadOptions{SuppressDeprecatedOrderWarnings: true},
+	)
+	if err != nil {
+		return nil, err
+	}
+	emitLoadCityConfigWarnings(resolvedWarningWriter, prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -47,11 +61,7 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	extras, err := builtinPackIncludesForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
-	if err != nil {
-		return nil, err
-	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath, extras...)
+	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
 	}
@@ -60,17 +70,11 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	return cfg, nil
 }
 
-// loadCityConfigWithoutBuiltinPackRefreshFS loads config using builtin packs
-// that are already materialized on disk. Completion paths use this to avoid
-// forcing refresh work on every shell invocation. That means completion may
-// briefly reflect stale builtin-pack content after an upgrade until a normal
-// gc command refreshes the generated packs.
+// loadCityConfigWithoutBuiltinPackRefreshFS loads config without performing
+// compatibility materialization under .gc/system/packs. Completion paths use
+// this same read-only behavior as the normal config load path.
 func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	var extras []string
-	if usesOSFS(fs) {
-		extras = builtinPackIncludes(filepath.Dir(tomlPath))
-	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath, extras...)
+	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
 	}

@@ -326,7 +326,8 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			// (if unusual) minimal config — emit the default fallback.
 		}
 		// Agents without a prompt_template: read a builtin prompt shipped by
-		// the core bootstrap pack, materialized under .gc/system/packs/core/.
+		// the explicit core bundled-pack import, falling back to the legacy
+		// .gc/system/packs compatibility path when needed.
 		// When formula_v2 is enabled, all agents use graph-worker.md.
 		// Otherwise pool agents use pool-worker.md.
 		// Pool instances have Pool=nil after resolution, so also check the
@@ -334,12 +335,12 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		if a.PromptTemplate == "" {
 			promptFile := ""
 			if cfg.Daemon.FormulaV2 {
-				promptFile = citylayout.SystemPacksRoot + "/core/assets/prompts/graph-worker.md"
+				promptFile = corePromptPathForPrime(cityPath, cfg, "graph-worker.md")
 			} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
-				promptFile = citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
+				promptFile = corePromptPathForPrime(cityPath, cfg, "pool-worker.md")
 			}
 			if promptFile != "" {
-				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
+				if content, fErr := os.ReadFile(promptFile); fErr == nil {
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt)
 					return 0
 				}
@@ -353,6 +354,21 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	// the correct output even under --strict.
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 	return 0
+}
+
+func corePromptPathForPrime(cityPath string, cfg *config.City, name string) string {
+	if cfg != nil {
+		dirs := append([]string{}, cfg.ExplicitImportPackDirs...)
+		dirs = append(dirs, cfg.BootstrapImportPackDirs...)
+		dirs = append(dirs, cfg.ImplicitImportPackDirs...)
+		dirs = append(dirs, cfg.PackDirs...)
+		for _, dir := range dirs {
+			if filepath.Base(dir) == "core" {
+				return filepath.Join(dir, "assets", "prompts", name)
+			}
+		}
+	}
+	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "core", "assets", "prompts", name)
 }
 
 func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []string {

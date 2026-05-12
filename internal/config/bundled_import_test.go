@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
@@ -193,6 +194,37 @@ func TestValidateInstalledRemoteCacheTreatsBundledGitENOTDIRAsNonCheckout(t *tes
 	}
 	if strings.Contains(err.Error(), "checking cached import") {
 		t.Fatalf("error = %v, want ENOTDIR classified as non-checkout", err)
+	}
+}
+
+func TestLoadWithIncludesAcceptsSyntheticBundledImportCache(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	source := bundledPackSource()
+	commit := "abc123def456abc123def456abc123def456abc123de"
+	cacheDir := bundledRepoCacheDir(home, source, commit)
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+	writeTestFile(t, cityDir, "city.toml", "[workspace]\n")
+	writeTestFile(t, cityDir, "pack.toml", fmt.Sprintf(`
+[pack]
+name = "city"
+schema = 2
+
+[imports.core]
+source = %q
+`, source))
+	writeBundledImportLock(t, cityDir, source, commit)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.ExplicitImportPackDirs) == 0 {
+		t.Fatal("ExplicitImportPackDirs is empty")
+	}
+	if got := filepath.ToSlash(cfg.ExplicitImportPackDirs[0]); !strings.HasSuffix(got, "internal/bootstrap/packs/core") {
+		t.Fatalf("ExplicitImportPackDirs[0] = %q, want core cache subpath", cfg.ExplicitImportPackDirs[0])
 	}
 }
 

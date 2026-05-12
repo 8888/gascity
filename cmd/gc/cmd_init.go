@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/overlay"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/spf13/cobra"
 )
 
@@ -248,8 +249,9 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
-non-interactively, or --file to initialize from an existing TOML config file.
+records bundled default packs as explicit pack registry imports. Use --provider
+to create the default minimal city non-interactively, or --file to initialize
+from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -783,6 +785,7 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return 1
 	}
 	cfg.Workspace.Name = cityName
+	applyDefaultBuiltinPackImports(cityPath, cfg)
 
 	// Create directory structure. With --preserve-existing, only refuse when
 	// the runtime scaffold is already in place — a pre-authored city.toml in
@@ -882,6 +885,10 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 			fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
 		}
 	}
+	if err := installInitImportsIfNeeded(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: installing imports: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := persistInitWorkspaceIdentity(fs, cityPath, filepath.Join(cityPath, "city.toml"), &cityCfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -980,6 +987,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.DefaultCity(cityName)
 	}
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
+	applyDefaultBuiltinPackImports(cityPath, &cfg)
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 
 	// Write prompt files only for the agents declared by the init template.
@@ -1028,6 +1036,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	}
 	if !wroteCity {
 		fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
+	}
+	if err := installInitImportsIfNeeded(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: installing imports: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	if err := persistInitWorkspaceIdentity(fs, cityPath, tomlPath, &cityCfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1122,6 +1134,53 @@ func shouldBootstrapScopedFileStore(cfg *config.City) bool {
 		return false
 	}
 	return strings.TrimSpace(cfg.Beads.Provider) == "file"
+}
+
+func applyDefaultBuiltinPackImports(cityPath string, cfg *config.City) {
+	if cfg == nil {
+		return
+	}
+	includeGastown := false
+	if _, ok := cfg.Imports["gastown"]; ok {
+		includeGastown = true
+	}
+	config.AddDefaultBuiltinImports(cfg, initShouldIncludeBDImport(cityPath, cfg), includeGastown)
+}
+
+func initShouldIncludeBDImport(cityPath string, cfg *config.City) bool {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
+		return providerUsesBdStoreContract(normalizeRawBeadsProvider(cityPath, v))
+	}
+	if cfg == nil {
+		return true
+	}
+	return providerUsesBdStoreContract(strings.TrimSpace(cfg.Beads.Provider))
+}
+
+func installInitImportsIfNeeded(fs fsys.FS, cityPath string) error {
+	if !canInstallImportsForFS(fs, cityPath) {
+		return nil
+	}
+	imports, err := collectAllImportsFS(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	if len(imports) == 0 {
+		return nil
+	}
+	lock, err := syncImports(cityPath, imports, packman.InstallResolveIfNeeded)
+	if err != nil {
+		return err
+	}
+	return writeImportLockfile(fs, cityPath, lock)
+}
+
+func canInstallImportsForFS(fs fsys.FS, cityPath string) bool {
+	if usesOSFS(fs) {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(cityPath, citylayout.CityConfigFile))
+	return err == nil
 }
 
 func bootstrapScopedFileProviderCityFS(fs fsys.FS, cityPath string) error {
@@ -1331,6 +1390,10 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 	cfg, cityName, cityPrefix, persistSiteIdentity, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := installInitImportsIfNeeded(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: installing imports: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if persistSiteIdentity {

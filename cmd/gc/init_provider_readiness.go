@@ -73,6 +73,12 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if _, rawErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawErr == nil {
+		if err := installInitImportsIfNeeded(fsys.OSFS{}, cityPath); err != nil {
+			fmt.Fprintf(stderr, "%s: installing imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if !opts.skipProviderReadiness {
 		if err := runInitProviderPreflight(cityPath, stdout, stderr, opts.commandName); err != nil {
 			return 1

@@ -10,6 +10,9 @@ env GC_BEADS=file
 env GC_DOLT=skip
 env GC_SESSION=fake
 
+mkdir $WORK/home
+env HOME=$WORK/home
+
 cd $WORK/city
 
 chmod 755 $WORK/city/assets/ops/commands/status/run.sh

@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -2976,7 +2977,7 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
+	promptTemplate := corePromptTemplatePath(cfg, "pool-worker.md")
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
@@ -3015,6 +3016,26 @@ func InjectImplicitAgents(cfg *City) {
 	}
 
 	injectControlDispatcherAgents(cfg, existing)
+}
+
+func corePromptTemplatePath(cfg *City, name string) string {
+	if cfg != nil {
+		for _, dir := range corePackSearchDirs(cfg) {
+			if readPackNameFromDir(dir) == "core" {
+				return filepath.Join(dir, "assets", "prompts", name)
+			}
+		}
+	}
+	return citylayout.SystemPacksRoot + "/core/assets/prompts/" + name
+}
+
+func corePackSearchDirs(cfg *City) []string {
+	var dirs []string
+	dirs = append(dirs, cfg.ExplicitImportPackDirs...)
+	dirs = append(dirs, cfg.BootstrapImportPackDirs...)
+	dirs = append(dirs, cfg.ImplicitImportPackDirs...)
+	dirs = append(dirs, cfg.PackDirs...)
+	return dirs
 }
 
 // ApplyAgentDefaults applies [agent_defaults] values to all agents that
@@ -3524,11 +3545,13 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 // DefaultCity returns a City with the given name and a single default
 // agent named "mayor". This is the config written by "gc init".
 func DefaultCity(name string) City {
-	return City{
+	c := City{
 		Workspace:     Workspace{Name: name},
 		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
+	AddDefaultBuiltinImports(&c, false, false)
+	return c
 }
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
@@ -3552,13 +3575,15 @@ func WizardCity(name, provider, startCommand string) City {
 		ws.Provider = provider
 		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
-	return City{
+	c := City{
 		Workspace: ws,
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
+	AddDefaultBuiltinImports(&c, false, false)
+	return c
 }
 
 // GastownCity returns a City configured for the gastown orchestration pack.
@@ -3579,13 +3604,10 @@ func GastownCity(name, provider, startCommand string) City {
 		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
 	maxRestarts := 5
-	return City{
+	c := City{
 		Workspace: ws,
-		Imports: map[string]Import{
-			"gastown": {Source: ".gc/system/packs/gastown"},
-		},
 		DefaultRigImports: map[string]Import{
-			"gastown": {Source: ".gc/system/packs/gastown"},
+			"gastown": {Source: builtinpacks.MustSource("gastown")},
 		},
 		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
@@ -3595,6 +3617,36 @@ func GastownCity(name, provider, startCommand string) City {
 			ShutdownTimeout: "5s",
 		},
 	}
+	AddDefaultBuiltinImports(&c, false, true)
+	return c
+}
+
+// AddDefaultBuiltinImports adds the bundled default pack imports to cfg.
+// Core is always explicit. Maintenance is explicit unless the Gastown pack is
+// also explicit, because Gastown imports maintenance itself. The bd pack is
+// optional because file-backed cities do not need bd/Dolt operations.
+func AddDefaultBuiltinImports(cfg *City, includeBD, includeGastown bool) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Imports == nil {
+		cfg.Imports = make(map[string]Import)
+	}
+	add := func(name string) {
+		if _, exists := cfg.Imports[name]; exists {
+			return
+		}
+		cfg.Imports[name] = Import{Source: builtinpacks.MustSource(name)}
+	}
+	add("core")
+	if includeBD {
+		add("bd")
+	}
+	if includeGastown {
+		add("gastown")
+		return
+	}
+	add("maintenance")
 }
 
 // Marshal encodes a City to TOML bytes.
