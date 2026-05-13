@@ -147,6 +147,26 @@ func TestBdStoreCreatePassesDeps(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesEphemeral(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{Title: "test", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--ephemeral") {
+		t.Errorf("args = %q, want --ephemeral", args)
+	}
+	if !created.Ephemeral {
+		t.Fatalf("created.Ephemeral = false, want true")
+	}
+}
+
 func TestBdStoreCreatePassesPriority(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {

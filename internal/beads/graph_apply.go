@@ -16,8 +16,17 @@ type GraphApplyStore interface {
 // Keys are caller-defined stable identifiers (for example recipe step IDs).
 type GraphApplyPlan struct {
 	CommitMessage string           `json:"commit_message,omitempty"`
+	Ephemeral     bool             `json:"ephemeral,omitempty"`
 	Nodes         []GraphApplyNode `json:"nodes"`
 	Edges         []GraphApplyEdge `json:"edges,omitempty"`
+}
+
+// EphemeralGraphApplyStore reports whether a GraphApplyStore can create an
+// entire graph in ephemeral storage. Older bd graph creation accepts but does
+// not honor --ephemeral, so callers that require ephemeral storage must fall
+// back to per-bead creation unless this returns true.
+type EphemeralGraphApplyStore interface {
+	SupportsEphemeralGraphApply() bool
 }
 
 // GraphApplyNode describes a single bead to create.

@@ -418,13 +418,13 @@ type bdIssue struct {
 	Assignee     string       `json:"assignee"`
 	From         string       `json:"from"`
 	ParentID     string       `json:"parent"`
+	Ephemeral    bool         `json:"ephemeral"`
 	Ref          string       `json:"ref"`
 	Needs        []string     `json:"needs"`
 	Description  string       `json:"description"`
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
-	Ephemeral    bool         `json:"ephemeral,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -543,13 +543,13 @@ func (b *bdIssue) toBead() Bead {
 		Assignee:     b.Assignee,
 		From:         from,
 		ParentID:     parentID,
+		Ephemeral:    b.Ephemeral,
 		Ref:          b.Ref,
 		Needs:        b.Needs,
 		Description:  b.Description,
 		Labels:       b.Labels,
 		Metadata:     b.Metadata,
 		Dependencies: deps,
-		Ephemeral:    b.Ephemeral,
 	}
 }
 
@@ -679,6 +679,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 		if created.Metadata == nil {
 			created.Metadata = maps.Clone(metadata)
 		}
+	}
+	if b.Ephemeral {
+		created.Ephemeral = true
 	}
 	return created, nil
 }

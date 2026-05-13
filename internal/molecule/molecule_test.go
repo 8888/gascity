@@ -1065,8 +1065,8 @@ func TestInstantiateGraphWorkflowDefersAssignmentsOnlyForFutureBlockers(t *testi
 	for _, created := range store.created {
 		createdByRef[created.Ref] = created
 	}
-	if got := createdByRef["graph-assign.setup"].Assignee; got != "worker" {
-		t.Fatalf("setup created assignee = %q, want worker", got)
+	if got := createdByRef["graph-assign.setup"].Assignee; got != "" {
+		t.Fatalf("setup created assignee = %q, want empty until activation", got)
 	}
 	if got := createdByRef["graph-assign.run"].Assignee; got != "" {
 		t.Fatalf("run created assignee = %q, want empty until blocker wiring completes", got)
@@ -1089,6 +1089,70 @@ func TestInstantiateGraphWorkflowDefersAssignmentsOnlyForFutureBlockers(t *testi
 
 	if len(store.updates) < 1 {
 		t.Fatalf("expected deferred assignment update for graph bead, got %d", len(store.updates))
+	}
+}
+
+func TestInstantiateFallbackCreatesEphemeralHiddenGraphThenActivates(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &recordingStore{Store: base}
+
+	recipe := &formula.Recipe{
+		Name: "graph-ephemeral",
+		Steps: []formula.RecipeStep{
+			{
+				ID:       "graph-ephemeral",
+				Title:    "Graph Ephemeral",
+				Type:     "task",
+				IsRoot:   true,
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+			},
+			{
+				ID:       "graph-ephemeral.work",
+				Title:    "Work",
+				Type:     "task",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "graph-ephemeral", DependsOnID: "graph-ephemeral.work", Type: "blocks"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	createdByRef := make(map[string]beads.Bead, len(store.created))
+	for _, created := range store.created {
+		createdByRef[created.Ref] = created
+		if !created.Ephemeral {
+			t.Fatalf("created bead %q Ephemeral = false, want true", created.Ref)
+		}
+	}
+	work := createdByRef["graph-ephemeral.work"]
+	if work.Type != "gate" {
+		t.Fatalf("work created type = %q, want hidden gate", work.Type)
+	}
+	if got := work.Metadata[DeferredTypeMetadataKey]; got != "task" {
+		t.Fatalf("work deferred type = %q, want task", got)
+	}
+	if got := work.Metadata[DeferredRoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("work deferred routed_to = %q, want worker", got)
+	}
+	if got := work.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("work gc.routed_to before activation = %q, want empty", got)
+	}
+
+	final, err := base.Get(result.IDMapping["graph-ephemeral.work"])
+	if err != nil {
+		t.Fatalf("get final work bead: %v", err)
+	}
+	if final.Type != "task" {
+		t.Fatalf("final work type = %q, want task", final.Type)
+	}
+	if got := final.Metadata["gc.routed_to"]; got != "worker" {
+		t.Fatalf("final work gc.routed_to = %q, want worker", got)
 	}
 }
 

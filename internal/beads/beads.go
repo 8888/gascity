@@ -27,17 +27,13 @@ type Bead struct {
 	Assignee     string            `json:"assignee,omitempty"`
 	From         string            `json:"from,omitempty"`
 	ParentID     string            `json:"parent,omitempty"`      // step → molecule; matches bd wire format
+	Ephemeral    bool              `json:"ephemeral,omitempty"`   // wisp-backed/no-history storage in bd
 	Ref          string            `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs        []string          `json:"needs,omitempty"`       // dependency step refs
 	Description  string            `json:"description,omitempty"` // step instructions
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Dependencies []Dep             `json:"dependencies,omitempty"`
-	// Ephemeral routes the bead to the wisps tier on Create. Wisps live in
-	// a separate Dolt table, are not git-synced, and are eligible for TTL
-	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
-	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
-	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.

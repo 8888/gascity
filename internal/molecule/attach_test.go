@@ -694,6 +694,7 @@ func TestAttachIdempotencyRejectsFailedPartialSubDAG(t *testing.T) {
 			"gc.root_bead_id":    root.ID,
 			"molecule_failed":    "true",
 		},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		t.Fatalf("list failed partial roots: %v", err)

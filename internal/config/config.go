@@ -2565,7 +2565,7 @@ func (a *Agent) AttachEnabled() bool {
 // Callers append their own bd flags (--limit=1 for first-row work_query;
 // piped to jq 'length' for the count-form) and shell handling.
 func bdReadyPoolDemandShell(target string) string {
-	return `bd ready --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+	return `bd ready --include-ephemeral --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
 }
 
 func (a *Agent) poolDemandTarget() string {
@@ -2621,7 +2621,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			// Tier 2: ready assigned to any of my identifiers (pre-assigned)
 			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 			`[ -z "$id" ] && continue; ` +
-			`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+			`r=$(bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
 			// Tier 3: ready unassigned routed to this config (shared routed queue).
@@ -2653,7 +2653,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +

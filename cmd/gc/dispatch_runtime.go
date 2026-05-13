@@ -701,12 +701,12 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --json --limit=` + limit + `; ` +
 		`done; ` +
 		`done; ` +
-		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; `
+		`emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; `
 	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + `; `
+		query += `emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + `; `
 	} else {
 		query += `:; `
 	}

@@ -40,7 +40,11 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 		return nil, fmt.Errorf("closing graph apply temp file: %w", err)
 	}
 
-	out, err := s.runner(s.dir, "bd", "create", "--graph", tmpPath, "--json")
+	args := []string{"create", "--graph", tmpPath, "--json"}
+	if plan.Ephemeral {
+		args = append(args, "--ephemeral")
+	}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
@@ -53,4 +57,11 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 	return &result, nil
+}
+
+// SupportsEphemeralGraphApply reports whether this store can apply a whole
+// graph directly into ephemeral storage. The current bd graph path does not
+// preserve ephemeral storage, so Gas City uses the sequential hidden fallback.
+func (s *BdStore) SupportsEphemeralGraphApply() bool {
+	return false
 }
