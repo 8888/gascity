@@ -195,9 +195,17 @@ type BdStore struct {
 	runner      CommandRunner   // injectable for testing
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+	storage     BdStoreOptions
 }
 
 const bdTransientWriteAttempts = 3
+
+// BdStoreOptions configures default storage behavior for beads created through
+// a BdStore. Explicit bead or graph flags are still honored.
+type BdStoreOptions struct {
+	Ephemeral bool
+	NoHistory bool
+}
 
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner) *BdStore {
@@ -206,7 +214,20 @@ func NewBdStore(dir string, runner CommandRunner) *BdStore {
 
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string) *BdStore {
-	return &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+	return NewBdStoreWithPrefixAndOptions(dir, runner, idPrefix, BdStoreOptions{})
+}
+
+// NewBdStoreWithPrefixAndOptions creates a BdStore with an explicit owned bead
+// ID prefix and default storage behavior.
+func NewBdStoreWithPrefixAndOptions(dir string, runner CommandRunner, idPrefix string, opts BdStoreOptions) *BdStore {
+	return &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix), storage: opts}
+}
+
+func (s *BdStore) effectiveCreateStorage(b Bead) (ephemeral bool, noHistory bool) {
+	if b.Ephemeral || b.NoHistory {
+		return b.Ephemeral, b.NoHistory
+	}
+	return s.storage.Ephemeral, s.storage.NoHistory
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -419,6 +440,7 @@ type bdIssue struct {
 	From         string       `json:"from"`
 	ParentID     string       `json:"parent"`
 	Ephemeral    bool         `json:"ephemeral"`
+	NoHistory    bool         `json:"no_history"`
 	Ref          string       `json:"ref"`
 	Needs        []string     `json:"needs"`
 	Description  string       `json:"description"`
@@ -544,6 +566,7 @@ func (b *bdIssue) toBead() Bead {
 		From:         from,
 		ParentID:     parentID,
 		Ephemeral:    b.Ephemeral,
+		NoHistory:    b.NoHistory,
 		Ref:          b.Ref,
 		Needs:        b.Needs,
 		Description:  b.Description,
@@ -612,6 +635,10 @@ func mapBdStatus(s string) string {
 
 // Create persists a new bead via bd create.
 func (s *BdStore) Create(b Bead) (Bead, error) {
+	effectiveEphemeral, effectiveNoHistory := s.effectiveCreateStorage(b)
+	if effectiveEphemeral && effectiveNoHistory {
+		return Bead{}, fmt.Errorf("bd create: ephemeral and no-history storage are mutually exclusive")
+	}
 	typ := b.Type
 	if typ == "" {
 		typ = "task"
@@ -638,8 +665,11 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)
 	}
-	if b.Ephemeral {
+	if effectiveEphemeral {
 		args = append(args, "--ephemeral")
+	}
+	if effectiveNoHistory {
+		args = append(args, "--no-history")
 	}
 	metadata := maps.Clone(b.Metadata)
 	if b.From != "" {
@@ -680,8 +710,11 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 			created.Metadata = maps.Clone(metadata)
 		}
 	}
-	if b.Ephemeral {
+	if effectiveEphemeral {
 		created.Ephemeral = true
+	}
+	if effectiveNoHistory {
+		created.NoHistory = true
 	}
 	return created, nil
 }

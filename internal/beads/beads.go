@@ -27,7 +27,8 @@ type Bead struct {
 	Assignee     string            `json:"assignee,omitempty"`
 	From         string            `json:"from,omitempty"`
 	ParentID     string            `json:"parent,omitempty"`      // step → molecule; matches bd wire format
-	Ephemeral    bool              `json:"ephemeral,omitempty"`   // wisp-backed/no-history storage in bd
+	Ephemeral    bool              `json:"ephemeral,omitempty"`   // wisp-backed, GC-eligible storage in bd
+	NoHistory    bool              `json:"no_history,omitempty"`  // wisp-backed durable storage without history tracking
 	Ref          string            `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs        []string          `json:"needs,omitempty"`       // dependency step refs
 	Description  string            `json:"description,omitempty"` // step instructions

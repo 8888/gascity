@@ -14,8 +14,16 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 	if plan == nil {
 		return nil, fmt.Errorf("graph apply plan is nil")
 	}
+	effective := *plan
+	if !effective.Ephemeral && !effective.NoHistory {
+		effective.Ephemeral = s.storage.Ephemeral
+		effective.NoHistory = s.storage.NoHistory
+	}
+	if effective.Ephemeral && effective.NoHistory {
+		return nil, fmt.Errorf("graph apply plan cannot be both ephemeral and no-history")
+	}
 
-	data, err := json.Marshal(plan)
+	data, err := json.Marshal(&effective)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling graph apply plan: %w", err)
 	}
@@ -41,8 +49,11 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 	}
 
 	args := []string{"create", "--graph", tmpPath, "--json"}
-	if plan.Ephemeral {
+	if effective.Ephemeral {
 		args = append(args, "--ephemeral")
+	}
+	if effective.NoHistory {
+		args = append(args, "--no-history")
 	}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
@@ -53,7 +64,7 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
 		return nil, fmt.Errorf("bd create --graph: parsing JSON: %w", err)
 	}
-	if err := ValidateGraphApplyResult(plan, &result); err != nil {
+	if err := ValidateGraphApplyResult(&effective, &result); err != nil {
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 	return &result, nil
