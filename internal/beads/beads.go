@@ -24,6 +24,8 @@ type Bead struct {
 	Type         string            `json:"issue_type"` // "task" default; matches bd wire format
 	Priority     *int              `json:"priority,omitempty"`
 	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at,omitempty,omitzero"`
+	ClosedAt     time.Time         `json:"closed_at,omitempty,omitzero"`
 	Assignee     string            `json:"assignee,omitempty"`
 	From         string            `json:"from,omitempty"`
 	ParentID     string            `json:"parent,omitempty"`      // step → molecule; matches bd wire format
