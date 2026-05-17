@@ -73,6 +73,8 @@ provider = "file"
 	if !ok {
 		t.Fatal("materialize.VendorSink(claude) = not found")
 	}
+	// Under explicit bundled-pack imports, core.gc-* skills load from the
+	// cache rather than .gc/system/packs.
 	wantStdout := fmt.Sprintf(
 		"materialized 1 skill(s) into %s: plan\n",
 		filepath.Join(absWorkdir, sinkDir),

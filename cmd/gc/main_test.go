@@ -246,14 +246,22 @@ func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
 		Setup: func(env *testscript.Env) error {
 			gcHome := filepath.Join(env.WorkDir, ".gc-home")
 			runtimeDir := filepath.Join(env.WorkDir, ".runtime")
+			home := filepath.Join(env.WorkDir, "home")
 			if err := os.MkdirAll(gcHome, 0o755); err != nil {
 				return err
 			}
 			if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 				return err
 			}
+			// testscript defaults HOME=/no-home; gc init now seeds the
+			// bundled-pack cache under $HOME/.gc/cache, so each script
+			// needs a writable HOME of its own.
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				return err
+			}
 			env.Setenv("GC_HOME", gcHome)
 			env.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+			env.Setenv("HOME", home)
 			return nil
 		},
 	}
