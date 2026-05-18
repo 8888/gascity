@@ -226,7 +226,7 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 	openBeads := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status != "open" || b.Ephemeral || IsReadyExcludedType(b.Type) {
+		if b.Status != "open" || IsReadyExcludedType(b.Type) {
 			continue
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {

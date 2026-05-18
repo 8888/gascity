@@ -177,8 +177,12 @@ func TestCreate_ephemeralRoundTripsThroughConformanceScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	if len(ready) != 1 || ready[0].ID != regular.ID {
-		t.Fatalf("Ready() = %+v, want only non-ephemeral bead %s", ready, regular.ID)
+	readyIDs := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyIDs[bead.ID] = true
+	}
+	if !readyIDs[regular.ID] || !readyIDs[ephemeral.ID] || len(readyIDs) != 2 {
+		t.Fatalf("Ready() = %+v, want regular %s and ephemeral %s", ready, regular.ID, ephemeral.ID)
 	}
 
 	issuesOnly, err := s.ListByLabel("order-run:digest", 0)

@@ -522,7 +522,7 @@ func TestMemStoreReadyPreservesBlocksWhenParentChildSharesPair(t *testing.T) {
 	}
 }
 
-func TestMemStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
+func TestMemStoreReadyIncludesEphemeralOpenTasks(t *testing.T) {
 	s := beads.NewMemStore()
 
 	ready, err := s.Create(beads.Bead{Title: "ready", Type: "task"})
@@ -538,13 +538,12 @@ func TestMemStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].ID != ready.ID {
-		t.Fatalf("Ready() = %+v, want only non-ephemeral task %s", got, ready.ID)
-	}
+	gotByID := map[string]bool{}
 	for _, bead := range got {
-		if bead.ID == ephemeral.ID {
-			t.Fatalf("ephemeral bead %s leaked into Ready(): %+v", ephemeral.ID, got)
-		}
+		gotByID[bead.ID] = true
+	}
+	if !gotByID[ready.ID] || !gotByID[ephemeral.ID] || len(gotByID) != 2 {
+		t.Fatalf("Ready() = %+v, want regular %s and ephemeral %s", got, ready.ID, ephemeral.ID)
 	}
 }
 
