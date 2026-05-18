@@ -50,6 +50,11 @@ type CachingStore struct {
 	problemf     func(string)
 	problemLog   map[string]cacheProblemLogState
 
+	primeMu      sync.Mutex
+	primeRunning bool
+	primeDone    chan struct{}
+	primeErr     error
+
 	// latencyWindow holds the most recent reconciliation bd-list
 	// durations for adaptive cadence decisions. Bounded at
 	// cacheLatencyWindowSize.
@@ -302,8 +307,9 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	return seq
 }
 
-// PrimeActive loads all non-closed beads (open + in_progress) into the
-// cache. These are fast indexed queries that populate enough data for
+// PrimeActive loads all non-closed beads (open + in_progress) across both
+// persistent issues and ephemeral wisps into the cache. These are fast indexed
+// queries that populate enough data for
 // startup paths without waiting for a full scan. The cache enters
 // cachePartial state: filtered active queries and Get hit cache for primed
 // beads, while closed-bead queries still delegate to the backing store.
@@ -315,7 +321,7 @@ func (c *CachingStore) PrimeActive() error {
 	var all []Bead
 	var partialErr error
 	for _, status := range []string{"open", "in_progress"} {
-		beads, err := c.backing.List(ListQuery{Status: status})
+		beads, err := c.backing.List(ListQuery{Status: status, TierMode: TierBoth})
 		if err != nil {
 			if !IsPartialResult(err) {
 				return fmt.Errorf("prime active (%s): %w", status, err)
@@ -375,7 +381,17 @@ func (c *CachingStore) PrimeActive() error {
 // Prime loads all active beads and deps from the backing store into memory.
 // Retries up to 3 times on failure since bd list can time out under
 // concurrent dolt load.
-func (c *CachingStore) Prime(_ context.Context) error {
+func (c *CachingStore) Prime(ctx context.Context) error {
+	done, owner := c.beginFullPrime()
+	if !owner {
+		return c.waitForFullPrimeDone(ctx, done)
+	}
+	err := c.prime(ctx)
+	c.finishFullPrime(done, err)
+	return err
+}
+
+func (c *CachingStore) prime(_ context.Context) error {
 	c.mu.RLock()
 	startSeq := c.mutationSeq
 	c.mu.RUnlock()
@@ -384,7 +400,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	var err error
 	var partialErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		all, err = c.backing.List(ListQuery{AllowScan: true, SkipLabels: true}) // active beads only (default)
+		all, err = c.backing.List(ListQuery{AllowScan: true, SkipLabels: true, TierMode: TierBoth}) // active beads only
 		if err == nil {
 			break
 		}
@@ -476,6 +492,63 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil
+}
+
+func (c *CachingStore) beginFullPrime() (chan struct{}, bool) {
+	c.primeMu.Lock()
+	defer c.primeMu.Unlock()
+	if c.primeRunning {
+		return c.primeDone, false
+	}
+	done := make(chan struct{})
+	c.primeRunning = true
+	c.primeDone = done
+	c.primeErr = nil
+	return done, true
+}
+
+func (c *CachingStore) finishFullPrime(done chan struct{}, err error) {
+	c.primeMu.Lock()
+	defer c.primeMu.Unlock()
+	if c.primeDone != done {
+		return
+	}
+	c.primeErr = err
+	c.primeRunning = false
+	close(done)
+}
+
+func (c *CachingStore) waitForFullPrimeDone(ctx context.Context, done chan struct{}) error {
+	if done == nil {
+		return ErrCacheUnavailable
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	c.primeMu.Lock()
+	defer c.primeMu.Unlock()
+	return c.primeErr
+}
+
+func (c *CachingStore) ensureFullPrime(ctx context.Context) error {
+	if c.cacheFullyPrimed() {
+		return nil
+	}
+	if err := c.Prime(ctx); err != nil {
+		return err
+	}
+	if !c.cacheFullyPrimed() {
+		return ErrCacheUnavailable
+	}
+	return nil
+}
+
+func (c *CachingStore) cacheFullyPrimed() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.state == cacheLive && c.primePartialErr == nil
 }
 
 // StartReconciler launches watchdog reconciliation. Cancel ctx to stop.
