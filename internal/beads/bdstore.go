@@ -1465,99 +1465,71 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
-// listEphemeral reads only the wisps tier using `bd query "ephemeral=true AND
-// <filters>"`. bd list only scans the issues table; bd query is the canonical
-// way to reach the wisps table (mirrors gastown's internal/beads/beads.go
-// listEphemeral path).
+// listEphemeral reads only the wisps tier. bd list reads both durable issues
+// and wisp-backed no-history/ephemeral rows, then applyListQuery narrows the
+// result to TierWisps. This avoids bd query's expensive query engine on
+// reconciler hot paths while preserving the wisp-tier contract.
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
-	clauses := []string{"ephemeral=true"}
-	serverFilteredOnly := true
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", query.Label)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", query.Status)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", query.Type)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", query.Assignee)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", query.ParentID)
-	clauses, serverFilteredOnly = appendBdQueryBeforeClause(clauses, serverFilteredOnly, "created", query.CreatedBefore)
-	clauses, serverFilteredOnly = appendBdQueryBeforeClause(clauses, serverFilteredOnly, "updated", query.UpdatedBefore)
-	clauses, serverFilteredOnly = appendBdQueryBeforeClause(clauses, serverFilteredOnly, "closed", query.ClosedBefore)
-
-	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
+	args := []string{"list", "--json"}
+	if query.Label != "" {
+		args = append(args, "--label="+query.Label)
+	}
+	if query.Assignee != "" {
+		args = append(args, "--assignee="+query.Assignee)
+	}
+	if query.Status != "" {
+		args = append(args, "--status="+query.Status)
+	}
+	if query.Type != "" {
+		args = append(args, "--type="+query.Type)
+	}
 	if query.IncludeClosed || query.Status == "closed" {
 		args = append(args, "--all")
 	}
-	wispsLimit := 0
-	if query.Limit > 0 && serverFilteredOnly && canApplyWispsServerLimit(query) {
-		wispsLimit = query.Limit
+	if !query.CreatedBefore.IsZero() {
+		args = append(args, "--created-before", query.CreatedBefore.Format(time.RFC3339Nano))
 	}
-	args = append(args, "--limit", strconv.Itoa(wispsLimit))
+	if !query.UpdatedBefore.IsZero() {
+		args = append(args, "--updated-before", query.UpdatedBefore.Format(time.RFC3339Nano))
+	}
+	if !query.ClosedBefore.IsZero() {
+		args = append(args, "--closed-before", query.ClosedBefore.Format(time.RFC3339Nano))
+	}
+	if query.ParentID != "" {
+		args = append(args, "--parent", query.ParentID)
+	}
+	keys := make([]string, 0, len(query.Metadata))
+	for k := range query.Metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--metadata-field", k+"="+query.Metadata[k])
+	}
+	limit := query.Limit
+	if query.Sort == SortCreatedAsc || len(query.Metadata) > 0 || !query.CreatedBefore.IsZero() ||
+		!query.UpdatedBefore.IsZero() || !query.ClosedBefore.IsZero() || query.ParentID != "" {
+		limit = 0
+	}
+	args = append(args, "--include-infra", "--include-gates", "--include-templates", "--limit", fmt.Sprintf("%d", limit))
 
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
-		return nil, fmt.Errorf("bd query (wisps): %w", err)
+		return nil, fmt.Errorf("bd list (wisps): %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
-		// bd query against wisps returns ephemeral beads; tolerate older bd
-		// versions that omit the ephemeral field in JSON.
-		result[i].Ephemeral = true
 	}
-	// Re-apply filters client-side (defense in depth against bd-query DSL
-	// drift) and re-cap Limit after client-only filters/sorts.
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) > 0 {
-			return filtered, &PartialResultError{Op: "bd query", Err: parseErr}
+			return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
 		}
-		return filtered, fmt.Errorf("bd query: %w", parseErr)
+		return filtered, fmt.Errorf("bd list: %w", parseErr)
 	}
 	return filtered, nil
-}
-
-func canApplyWispsServerLimit(query ListQuery) bool {
-	return query.Sort == SortDefault && len(query.Metadata) == 0
-}
-
-func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {
-	if value == "" {
-		return clauses, serverFilteredOnly
-	}
-	if !isBareBdQueryValue(value) {
-		return clauses, false
-	}
-	return append(clauses, field+"="+value), serverFilteredOnly
-}
-
-func appendBdQueryBeforeClause(clauses []string, serverFilteredOnly bool, field string, before time.Time) ([]string, bool) {
-	if before.IsZero() {
-		return clauses, serverFilteredOnly
-	}
-	value := before.Format(time.RFC3339Nano)
-	if !isBareBdQueryValue(value) {
-		return clauses, false
-	}
-	return append(clauses, field+"<"+value), serverFilteredOnly
-}
-
-// isBareBdQueryValue reports whether value can be emitted unquoted into the bd
-// query DSL. Values outside this narrow token set are filtered client-side.
-func isBareBdQueryValue(value string) bool {
-	upper := strings.ToUpper(value)
-	if upper == "AND" || upper == "OR" || upper == "NOT" {
-		return false
-	}
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == ':' || r == '.':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // listBothTiers unions the issues and wisps tiers in a single logical query.
@@ -1673,30 +1645,27 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 // Ready returns open ready beads via bd ready.
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
-	args := []string{"ready", "--json", "--include-ephemeral"}
-	if q.Assignee != "" {
-		args = append(args, "--assignee", q.Assignee)
-	}
-	if q.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(q.Limit))
-	} else {
-		args = append(args, "--limit", "0")
-	}
+
+	args := bdReadyArgs(q, true)
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
+
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, 0, len(issues))
 	for i := range issues {
 		bead := issues[i].toBead()
-		if IsReadyExcludedType(bead.Type) {
+		if IsReadyExcludedBead(bead) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {
 			continue
 		}
 		result = append(result, bead)
+	}
+	if q.Limit > 0 && len(result) > q.Limit {
+		result = result[:q.Limit]
 	}
 	if parseErr != nil {
 		if len(result) == 0 {
@@ -1705,6 +1674,22 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
 	}
 	return result, nil
+}
+
+func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
+	args := []string{"ready", "--json"}
+	if includeEphemeral {
+		args = append(args, "--include-ephemeral")
+	}
+	if q.Assignee != "" {
+		args = append(args, "--assignee", q.Assignee)
+	}
+	if q.Limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(q.Limit))
+	} else {
+		args = append(args, "--limit", "0")
+	}
+	return args
 }
 
 // DepAdd records a dependency via bd dep add.

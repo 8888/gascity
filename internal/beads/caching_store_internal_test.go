@@ -348,6 +348,45 @@ func TestHandlesForPlainStoreReadsLogicalBothTiers(t *testing.T) {
 	assertHasBeadIDs(t, liveRows, issue.ID, wisp.ID)
 }
 
+type legacyCachedListStore struct {
+	*MemStore
+	cached []Bead
+	ok     bool
+}
+
+func (s *legacyCachedListStore) CachedList(query ListQuery) ([]Bead, bool) {
+	return ApplyListQuery(s.cached, query), s.ok
+}
+
+func TestHandlesForUsesLegacyCachedListAsCachedReader(t *testing.T) {
+	t.Parallel()
+
+	cached := Bead{
+		ID:        "cached-1",
+		Title:     "cached",
+		Status:    "closed",
+		Labels:    []string{"order-run:nightly"},
+		Ephemeral: true,
+		CreatedAt: time.Now(),
+	}
+	store := &legacyCachedListStore{
+		MemStore: NewMemStore(),
+		cached:   []Bead{cached},
+		ok:       true,
+	}
+
+	rows, err := HandlesFor(store).Cached.List(ListQuery{
+		Label:         "order-run:nightly",
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("Cached.List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != cached.ID {
+		t.Fatalf("rows = %#v, want cached row", rows)
+	}
+}
+
 func TestCachingStoreListWispsUsesCacheByDefault(t *testing.T) {
 	t.Parallel()
 
@@ -2156,7 +2195,7 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 		t.Fatalf("Ready: %v", err)
 	}
 	if readyCalls != 1 {
-		t.Fatalf("Ready calls = %d, want backing Ready fallback when deps are incomplete", readyCalls)
+		t.Fatalf("Ready calls = %d, want one backing Ready fallback scan when deps are incomplete", readyCalls)
 	}
 }
 
@@ -2207,7 +2246,7 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 	}
 }
 
-func TestCachingStoreReadyIncludesEphemeralOpenTasks(t *testing.T) {
+func TestCachingStoreReadyIncludesActionableStorageAndExcludesSemanticInfra(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
@@ -2220,9 +2259,22 @@ func TestCachingStoreReadyIncludesEphemeralOpenTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create ready: %v", err)
 	}
-	ephemeral, err := cache.Create(Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	noHistory, err := cache.Create(Bead{Title: "no history", Type: "task", NoHistory: true})
+	if err != nil {
+		t.Fatalf("Create no history: %v", err)
+	}
+	ephemeral, err := cache.Create(Bead{Title: "ephemeral work", Type: "task", Ephemeral: true})
 	if err != nil {
 		t.Fatalf("Create ephemeral: %v", err)
+	}
+	if _, err := cache.Create(Bead{Title: "wisp", Type: "task", Labels: []string{"gc:wisp"}, Metadata: map[string]string{"gc.kind": "wisp"}}); err != nil {
+		t.Fatalf("Create wisp: %v", err)
+	}
+	if _, err := cache.Create(Bead{Title: "session", Type: "task", Labels: []string{"gc:session"}}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := cache.Create(Bead{Title: "order tracking", Type: "task", Labels: []string{"gc:order-tracking"}}); err != nil {
+		t.Fatalf("Create order tracking: %v", err)
 	}
 
 	got, err := cache.Ready()
@@ -2233,8 +2285,8 @@ func TestCachingStoreReadyIncludesEphemeralOpenTasks(t *testing.T) {
 	for _, bead := range got {
 		gotIDs[bead.ID] = true
 	}
-	if !gotIDs[ready.ID] || !gotIDs[ephemeral.ID] || len(gotIDs) != 2 {
-		t.Fatalf("Ready() = %+v, want regular %s and ephemeral %s", got, ready.ID, ephemeral.ID)
+	if !gotIDs[ready.ID] || !gotIDs[noHistory.ID] || !gotIDs[ephemeral.ID] || len(gotIDs) != 3 {
+		t.Fatalf("Ready() = %+v, want regular %s, no-history %s, and ephemeral %s", got, ready.ID, noHistory.ID, ephemeral.ID)
 	}
 	cached, ok := cache.CachedReady()
 	if !ok {
@@ -2244,8 +2296,8 @@ func TestCachingStoreReadyIncludesEphemeralOpenTasks(t *testing.T) {
 	for _, bead := range cached {
 		cachedIDs[bead.ID] = true
 	}
-	if !cachedIDs[ready.ID] || !cachedIDs[ephemeral.ID] || len(cachedIDs) != 2 {
-		t.Fatalf("CachedReady() = %+v, want regular %s and ephemeral %s", cached, ready.ID, ephemeral.ID)
+	if !cachedIDs[ready.ID] || !cachedIDs[noHistory.ID] || !cachedIDs[ephemeral.ID] || len(cachedIDs) != 3 {
+		t.Fatalf("CachedReady() = %+v, want regular %s, no-history %s, and ephemeral %s", cached, ready.ID, noHistory.ID, ephemeral.ID)
 	}
 }
 

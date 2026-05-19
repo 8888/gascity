@@ -52,8 +52,17 @@ func HandlesFor(store Store) StoreHandles {
 	}); ok {
 		return provider.Handles()
 	}
+	cached := CachedReader(logicalCachedStoreReader{store: store})
+	if legacyCache, ok := store.(interface {
+		CachedList(ListQuery) ([]Bead, bool)
+	}); ok {
+		cached = cachedListMethodReader{
+			logicalCachedStoreReader: logicalCachedStoreReader{store: store},
+			cache:                    legacyCache,
+		}
+	}
 	return StoreHandles{
-		Cached: logicalCachedStoreReader{store: store},
+		Cached: cached,
 		Live:   logicalLiveStoreReader{store: store},
 		Writer: store,
 	}
@@ -89,6 +98,21 @@ func (r logicalCachedStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 func (r logicalCachedStoreReader) DepList(id, direction string) ([]Dep, error) {
 	return r.store.DepList(id, direction)
+}
+
+type cachedListMethodReader struct {
+	logicalCachedStoreReader
+	cache interface {
+		CachedList(ListQuery) ([]Bead, bool)
+	}
+}
+
+func (r cachedListMethodReader) List(query ListQuery) ([]Bead, error) {
+	rows, ok := r.cache.CachedList(logicalCachedListQuery(query))
+	if !ok {
+		return nil, fmt.Errorf("listing beads from cache: %w", ErrCacheUnavailable)
+	}
+	return rows, nil
 }
 
 type logicalLiveStoreReader struct {
@@ -226,7 +250,7 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 	openBeads := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status != "open" || IsReadyExcludedType(b.Type) {
+		if b.Status != "open" || IsReadyExcludedBead(b) {
 			continue
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {

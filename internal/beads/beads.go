@@ -106,10 +106,19 @@ func IsMoleculeType(t string) bool {
 	return moleculeTypes[t]
 }
 
+const (
+	readyExcludeSessionLabel = "gc:session"
+	readyExcludeWispLabel    = "gc:wisp"
+	readyExcludeWispKind     = "wisp"
+	readyExcludeOrderRun     = "gc:order-tracking"
+	readyExcludeLegacyOrder  = "order-tracking"
+)
+
 // readyExcludeTypes enumerates bead types that Ready() excludes by
 // default. These are infrastructure or workflow-container types that
-// represent internal bookkeeping rather than actionable work. This
-// matches the exclusion list in the bd CLI's GetReadyWork query.
+// represent internal bookkeeping rather than actionable work. Plain
+// NoHistory and Ephemeral task beads remain actionable unless their labels or
+// metadata identify them as bookkeeping.
 var readyExcludeTypes = map[string]bool{
 	"merge-request": true, // processed by automation
 	"gate":          true, // async wait conditions
@@ -126,6 +135,38 @@ var readyExcludeTypes = map[string]bool{
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
 	return readyExcludeTypes[t]
+}
+
+// IsReadyExcludedBead reports whether a bead is infrastructure rather than
+// actionable Ready work.
+func IsReadyExcludedBead(b Bead) bool {
+	if IsReadyExcludedType(b.Type) {
+		return true
+	}
+	if b.Metadata["gc.kind"] == readyExcludeWispKind && !hasReadyRoute(b) {
+		return true
+	}
+	for _, label := range b.Labels {
+		switch label {
+		case readyExcludeSessionLabel, readyExcludeOrderRun, readyExcludeLegacyOrder:
+			return true
+		case readyExcludeWispLabel:
+			if !hasReadyRoute(b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasReadyRoute(b Bead) bool {
+	if b.Assignee != "" {
+		return true
+	}
+	if b.Metadata["gc.routed_to"] != "" {
+		return true
+	}
+	return false
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID

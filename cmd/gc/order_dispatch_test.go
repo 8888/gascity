@@ -164,6 +164,15 @@ func orderSnapshotHasName(aa []orders.Order, name string) bool {
 	return orderSnapshotByName(aa, name).Name != ""
 }
 
+type orderRunListCountingStore struct {
+	beads.Store
+
+	orderRunLists                  int
+	legacyLists                    int
+	unfilteredCanonicalOpenLists   int
+	unboundedCanonicalHistoryLists int
+}
+
 type createdAtOverrideStore struct {
 	beads.Store
 
@@ -224,6 +233,26 @@ func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *countingListStore) reset() {
 	s.includeClosedLists = 0
+}
+
+func (s *orderRunListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") {
+		s.orderRunLists++
+	}
+	return s.Store.List(query)
+}
+
+func (s *orderRunListCountingStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if label == labelOrderTracking && limit == 0 && !beads.HasOpt(opts, beads.IncludeClosed) {
+		s.unfilteredCanonicalOpenLists++
+	}
+	if label == labelOrderTracking && limit == 0 && beads.HasOpt(opts, beads.IncludeClosed) {
+		s.unboundedCanonicalHistoryLists++
+	}
+	if label == legacyLabelOrderTracking {
+		s.legacyLists++
+	}
+	return s.Store.ListByLabel(label, limit, opts...)
 }
 
 func (s *createdAtOverrideStore) Create(b beads.Bead) (beads.Bead, error) {
@@ -1166,6 +1195,53 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchCooldownUsesTrackingIndexWithoutOrderRunScans(t *testing.T) {
+	base := beads.NewMemStore()
+	for _, name := range []string{"order-a", "order-b", "order-c"} {
+		tracking, err := base.Create(beads.Bead{
+			Title:     "order:" + name,
+			Labels:    orderTrackingLabels(name),
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		if _, err := base.CloseAll([]string{tracking.ID}, map[string]string{"close_reason": completedOrderTrackingCloseReason}); err != nil {
+			t.Fatalf("CloseAll(%s): %v", name, err)
+		}
+	}
+
+	store := &orderRunListCountingStore{Store: base}
+	aa := []orders.Order{
+		{Name: "order-a", Trigger: "cooldown", Interval: "1h", Exec: "true"},
+		{Name: "order-b", Trigger: "cooldown", Interval: "1h", Exec: "true"},
+		{Name: "order-c", Trigger: "cooldown", Interval: "1h", Exec: "true"},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
+		t.Fatal("cooldown orders should not be due")
+		return nil, nil
+	}, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if store.orderRunLists != 0 {
+		t.Fatalf("order-run list queries = %d, want 0; dispatcher should use the tracking index", store.orderRunLists)
+	}
+	if store.legacyLists != 0 {
+		t.Fatalf("legacy order-tracking list queries = %d, want 0 in dispatch hot path", store.legacyLists)
+	}
+	if store.unfilteredCanonicalOpenLists != 0 {
+		t.Fatalf("unfiltered canonical open tracking queries = %d, want 0 in dispatch hot path", store.unfilteredCanonicalOpenLists)
+	}
+	if store.unboundedCanonicalHistoryLists != 0 {
+		t.Fatalf("unbounded canonical order-tracking history queries = %d, want 0 in dispatch hot path", store.unboundedCanonicalHistoryLists)
+	}
+}
+
 func TestOrderDispatchMultiple(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -1250,11 +1326,15 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	store := &countingListStore{Store: baseStore}
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 
-	if _, err := store.Create(beads.Bead{
+	recent, err := store.Create(beads.Bead{
 		Title:     "recent run",
-		Labels:    []string{"order-run:test-order"},
+		Labels:    []string{"order-run:test-order", labelOrderTracking},
 		CreatedAt: now.Add(-30 * time.Minute),
-	}); err != nil {
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(recent.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1276,11 +1356,15 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	}
 
 	store.reset()
-	if _, err := store.Create(beads.Bead{
+	manual, err := store.Create(beads.Bead{
 		Title:     "manual run",
-		Labels:    []string{"order-run:test-order"},
+		Labels:    []string{"order-run:test-order", labelOrderTracking},
 		CreatedAt: now.Add(20 * time.Minute),
-	}); err != nil {
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(manual.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1863,11 +1947,14 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 	store := beads.NewMemStore()
 
 	// Seed a recent exec run.
-	_, err := store.Create(beads.Bead{
+	recent, err := store.Create(beads.Bead{
 		Title:  "order:wasteland-poll",
-		Labels: []string{"order-run:wasteland-poll"},
+		Labels: []string{"order-run:wasteland-poll", labelOrderTracking},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(recent.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4100,7 +4187,7 @@ func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Fail the first 2 ListByLabel calls, succeed on the 3rd. The successful
+	// Fail the first 2 logical list calls, succeed on the 3rd. The successful
 	// sweep also scans the legacy tracking label.
 	fs := &countFailStore{Store: inner, failCount: 2}
 	closed, err := sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
@@ -4111,7 +4198,7 @@ func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 		t.Fatalf("closed = %d, want 1", closed)
 	}
 	if fs.calls != 4 {
-		t.Fatalf("ListByLabel calls = %d, want 4", fs.calls)
+		t.Fatalf("List calls = %d, want 4", fs.calls)
 	}
 }
 
@@ -4132,7 +4219,7 @@ func TestSweepOrphanedOrderTracking_RetryExhausted(t *testing.T) {
 		t.Fatal("expected error when retries exhausted")
 	}
 	if fs.calls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+		t.Fatalf("List calls = %d, want 3", fs.calls)
 	}
 }
 
@@ -4164,23 +4251,23 @@ func TestSweepOrphanedOrderTracking_RetryOnPartialClose(t *testing.T) {
 		t.Fatalf("n = %d, want 3 (accumulated across retries)", n)
 	}
 	if fs.listCalls != 6 {
-		t.Fatalf("ListByLabel calls = %d, want 6 (current and legacy label scans per retry)", fs.listCalls)
+		t.Fatalf("List calls = %d, want 6 (current and legacy label scans per retry)", fs.listCalls)
 	}
 }
 
-// countFailStore wraps a Store and fails the first N ListByLabel calls.
+// countFailStore wraps a Store and fails the first N logical List calls.
 type countFailStore struct {
 	beads.Store
 	failCount int
 	calls     int
 }
 
-func (f *countFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+func (f *countFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	f.calls++
 	if f.calls <= f.failCount {
 		return nil, fmt.Errorf("connection refused")
 	}
-	return f.Store.ListByLabel(label, limit, opts...)
+	return f.Store.List(query)
 }
 
 // closeFailStore wraps a Store and always fails CloseAll with a
@@ -4191,9 +4278,9 @@ type closeFailStore struct {
 	closeN    int // number of beads "closed" before error
 }
 
-func (f *closeFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+func (f *closeFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	f.listCalls++
-	return f.Store.ListByLabel(label, limit, opts...)
+	return f.Store.List(query)
 }
 
 func (f *closeFailStore) CloseAll(_ []string, _ map[string]string) (int, error) {
@@ -4370,11 +4457,14 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 	store := beads.NewMemStore()
 
 	// Seed a recent run for rig-A's order (scoped name).
-	_, err := store.Create(beads.Bead{
+	recent, err := store.Create(beads.Bead{
 		Title:  "order run",
-		Labels: []string{"order-run:db-health:rig:rig-a"},
+		Labels: []string{"order-run:db-health:rig:rig-a", labelOrderTracking},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(recent.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4704,11 +4794,15 @@ pool = "worker"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(city): %v", err)
 	}
-	if _, err := cityStore.Create(beads.Bead{
+	legacyRun, err := cityStore.Create(beads.Bead{
 		Title:  "legacy rig digest run",
-		Labels: []string{"order-run:rig-digest:rig:frontend"},
-	}); err != nil {
+		Labels: []string{"order-run:rig-digest:rig:frontend", labelOrderTracking},
+	})
+	if err != nil {
 		t.Fatalf("Create(legacy city run): %v", err)
+	}
+	if err := cityStore.Close(legacyRun.ID); err != nil {
+		t.Fatalf("Close(legacy city run): %v", err)
 	}
 
 	cfg := &config.City{
@@ -4847,7 +4941,7 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order-run:rig-digest:rig:frontend",
+		failLabel: labelOrderTracking,
 	}
 
 	stderr := &bytes.Buffer{}
@@ -4928,7 +5022,7 @@ func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) 
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order-run:rig-digest:rig:frontend",
+		failLabel: labelOrderTracking,
 	}
 
 	stderr := &bytes.Buffer{}
@@ -5013,7 +5107,7 @@ pool = "worker"
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  "existing work",
-		Labels: []string{"order-run:file-order"},
+		Labels: []string{"order-run:file-order", labelOrderTracking},
 	}); err != nil {
 		t.Fatalf("Create(existing work): %v", err)
 	}
@@ -5479,10 +5573,10 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	store := beads.NewMemStore()
 
-	// Seed an open wisp (non-tracking bead) for this order.
+	// Seed an in-flight tracking bead for this order.
 	_, err := store.Create(beads.Bead{
-		Title:  "mol-do-work", // not "order:my-auto" → counts as real work
-		Labels: []string{"order-run:my-auto"},
+		Title:  "order:my-auto",
+		Labels: []string{"order-run:my-auto", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatal(err)

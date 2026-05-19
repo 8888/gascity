@@ -522,14 +522,30 @@ func TestMemStoreReadyPreservesBlocksWhenParentChildSharesPair(t *testing.T) {
 	}
 }
 
-func TestMemStoreReadyIncludesEphemeralOpenTasks(t *testing.T) {
+func TestMemStoreReadyIncludesActionableStorageAndExcludesSemanticInfra(t *testing.T) {
 	s := beads.NewMemStore()
 
 	ready, err := s.Create(beads.Bead{Title: "ready", Type: "task"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ephemeral, err := s.Create(beads.Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	noHistory, err := s.Create(beads.Bead{Title: "no history", Type: "task", NoHistory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeral, err := s.Create(beads.Bead{Title: "ephemeral work", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Create(beads.Bead{Title: "wisp", Type: "task", Labels: []string{"gc:wisp"}, Metadata: map[string]string{"gc.kind": "wisp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Create(beads.Bead{Title: "session", Type: "task", Labels: []string{"gc:session"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Create(beads.Bead{Title: "order tracking", Type: "task", Labels: []string{"gc:order-tracking"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,8 +558,8 @@ func TestMemStoreReadyIncludesEphemeralOpenTasks(t *testing.T) {
 	for _, bead := range got {
 		gotByID[bead.ID] = true
 	}
-	if !gotByID[ready.ID] || !gotByID[ephemeral.ID] || len(gotByID) != 2 {
-		t.Fatalf("Ready() = %+v, want regular %s and ephemeral %s", got, ready.ID, ephemeral.ID)
+	if !gotByID[ready.ID] || !gotByID[noHistory.ID] || !gotByID[ephemeral.ID] || len(gotByID) != 3 {
+		t.Fatalf("Ready() = %+v, want regular %s, no-history %s, and ephemeral %s", got, ready.ID, noHistory.ID, ephemeral.ID)
 	}
 }
 
@@ -574,15 +590,22 @@ func TestMemStoreEphemeralTierPartitioning(t *testing.T) {
 	if !wisp.Ephemeral {
 		t.Fatalf("wisp.Ephemeral = false, want true")
 	}
+	noHistory, err := m.Create(beads.Bead{Title: "no history", Labels: []string{"k"}, NoHistory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !noHistory.NoHistory {
+		t.Fatalf("noHistory.NoHistory = false, want true")
+	}
 
 	cases := []struct {
 		name    string
 		tier    beads.TierMode
 		wantIDs []string
 	}{
-		{"issues only (default)", beads.TierIssues, []string{plain.ID}},
-		{"wisps only", beads.TierWisps, []string{wisp.ID}},
-		{"both tiers", beads.TierBoth, []string{plain.ID, wisp.ID}},
+		{"issues only (default)", beads.TierIssues, []string{plain.ID, noHistory.ID}},
+		{"wisps only", beads.TierWisps, []string{wisp.ID, noHistory.ID}},
+		{"both tiers", beads.TierBoth, []string{plain.ID, wisp.ID, noHistory.ID}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

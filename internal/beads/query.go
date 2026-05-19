@@ -27,16 +27,16 @@ const (
 // For BdStore, where issues and wisps live in physically separate Dolt
 // tables, TierIssues is naturally tier-restricted by the underlying
 // `bd list` call. For in-memory stores (MemStore, ApplyListQuery) where
-// both tiers may share a single backing slice, Matches now filters out
-// any bead with Ephemeral=true under TierIssues. Pre-PR, such a query
-// would have returned ephemeral rows mixed in; callers that relied on
-// that behavior must opt into TierBoth explicitly.
+// both tiers may share a single backing slice, Matches filters out
+// Ephemeral=true rows under TierIssues. NoHistory rows are wisp-backed in bd
+// but durable/visible by default, so they also match TierIssues.
 type TierMode int
 
 const (
 	// TierIssues reads only the permanent issues tier. Default.
 	TierIssues TierMode = iota
-	// TierWisps reads only the ephemeral wisps tier.
+	// TierWisps reads only the wisps tier, including both ephemeral and
+	// no-history rows.
 	TierWisps
 	// TierBoth unions the issues and wisps tiers, deduping by ID and
 	// preserving the query's sort.
@@ -124,7 +124,7 @@ func (q ListQuery) IncludesClosed() bool {
 func (q ListQuery) Matches(b Bead) bool {
 	switch q.TierMode {
 	case TierWisps:
-		if !b.Ephemeral {
+		if !b.Ephemeral && !b.NoHistory {
 			return false
 		}
 	case TierBoth:

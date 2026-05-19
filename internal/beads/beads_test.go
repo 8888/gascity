@@ -78,6 +78,83 @@ func TestIsReadyExcludedType(t *testing.T) {
 	}
 }
 
+func TestIsReadyExcludedBead(t *testing.T) {
+	tests := []struct {
+		name string
+		bead Bead
+		want bool
+	}{
+		{
+			name: "task is actionable",
+			bead: Bead{Type: "task"},
+		},
+		{
+			name: "no-history task is actionable",
+			bead: Bead{Type: "task", NoHistory: true},
+		},
+		{
+			name: "ephemeral task is actionable",
+			bead: Bead{Type: "task", Ephemeral: true},
+		},
+		{
+			name: "session type is infrastructure",
+			bead: Bead{Type: "session"},
+			want: true,
+		},
+		{
+			name: "session label is infrastructure even on task type",
+			bead: Bead{Type: "task", Labels: []string{"gc:session"}},
+			want: true,
+		},
+		{
+			name: "wisp label is infrastructure even on task type",
+			bead: Bead{Type: "task", Labels: []string{"gc:wisp"}},
+			want: true,
+		},
+		{
+			name: "wisp metadata is infrastructure even without label",
+			bead: Bead{Type: "task", Metadata: map[string]string{"gc.kind": "wisp"}},
+			want: true,
+		},
+		{
+			name: "routed wisp root is actionable",
+			bead: Bead{
+				Type:     "task",
+				Labels:   []string{"gc:wisp"},
+				Metadata: map[string]string{"gc.kind": "wisp", "gc.routed_to": "mayor"},
+			},
+			want: false,
+		},
+		{
+			name: "assigned wisp root is actionable",
+			bead: Bead{
+				Type:     "task",
+				Labels:   []string{"gc:wisp"},
+				Assignee: "mayor",
+				Metadata: map[string]string{"gc.kind": "wisp"},
+			},
+			want: false,
+		},
+		{
+			name: "order tracking label is infrastructure",
+			bead: Bead{Type: "task", Labels: []string{"gc:order-tracking"}},
+			want: true,
+		},
+		{
+			name: "legacy order tracking label is infrastructure",
+			bead: Bead{Type: "task", Labels: []string{"order-tracking"}},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsReadyExcludedBead(tt.bead); got != tt.want {
+				t.Fatalf("IsReadyExcludedBead(%+v) = %v, want %v", tt.bead, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestListQueryCreatedBeforeFiltersBeforeLimit(t *testing.T) {
 	base := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	items := []Bead{
