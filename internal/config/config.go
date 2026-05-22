@@ -2659,7 +2659,12 @@ func (a *Agent) AttachEnabled() bool {
 // Callers append their own bd flags (--limit=1 for first-row work_query;
 // piped to jq 'length' for the count-form) and shell handling.
 func bdReadyPoolDemandShell(target string) string {
-	return `bd ready --include-ephemeral --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+	return `bd ready --include-ephemeral --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --sort oldest --json`
+}
+
+func routedReadyTierCommand(target string) string {
+	return bdReadyPoolDemandShell(target) +
+		` --limit=0 2>/dev/null | jq -c "sort_by((.priority // 3), .created_at, .id) | .[:1]"`
 }
 
 func (a *Agent) poolDemandTarget() string {
@@ -2724,7 +2729,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
-			`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
+			`r=$(` + routedReadyTierCommand(target) + `); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`printf "[]"'`
 	}
@@ -2758,9 +2763,11 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`ephemeral|"") ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; ` +
-		`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
+		`r=$(` + routedReadyTierCommand(target) + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		bdReadyPoolDemandShell(legacyTarget) + ` --limit=1 2>/dev/null'`
+		`r=$(` + routedReadyTierCommand(legacyTarget) + `); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`printf "[]"'`
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {

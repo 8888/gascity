@@ -54,7 +54,7 @@ type AwakeSessionBead struct {
 	ID                     string
 	SessionName            string
 	Template               string
-	State                  string // "creating", "active", "asleep", "drained", "closed"
+	State                  string // "start-pending", "creating", "active", "asleep", "drained", "closed"
 	SleepReason            string
 	ManualSession          bool
 	PendingCreate          bool      // controller claimed this bead for initial start

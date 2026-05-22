@@ -117,13 +117,12 @@ func newControllerState(
 	return cs
 }
 
-// wrapWithCachingStore wraps a BdStore with a CachingStore that primes
-// and starts a background reconciler. Non-BdStore stores are returned as-is.
+// wrapWithCachingStore wraps a Store with a CachingStore that primes and starts
+// a background reconciler.
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
-	bdStore, ok := baseStore.(*beads.BdStore)
-	if !ok {
-		return store
+	if baseStore == nil {
+		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -142,7 +141,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			})
 		}
 	}
-	cs := beads.NewCachingStore(bdStore, onChange)
+	cs := beads.NewCachingStore(baseStore, onChange)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can

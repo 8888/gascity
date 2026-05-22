@@ -16,6 +16,10 @@ import (
 
 const poolManagedMetadataKey = "pool_managed"
 
+type explicitBeadIDStore interface {
+	IDPrefix() string
+}
+
 type poolSessionCreateIdentity struct {
 	AgentName string
 	Alias     string
@@ -314,6 +318,18 @@ func openSessionNameTaken(snapshot *sessionBeadSnapshot, name, selfID string) bo
 		}
 	}
 	return false
+}
+
+func poolSessionExplicitBeadID(store beads.Store, instanceToken string) string {
+	prefixStore, ok := store.(explicitBeadIDStore)
+	if !ok {
+		return ""
+	}
+	prefix := strings.Trim(strings.TrimSpace(prefixStore.IDPrefix()), "-")
+	if prefix == "" || instanceToken == "" {
+		return ""
+	}
+	return prefix + "-session-" + instanceToken
 }
 
 // resolveSessionName returns the session name for a qualified agent name.

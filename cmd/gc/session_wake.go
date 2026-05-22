@@ -32,6 +32,7 @@ func preWakeCommit(
 	session *beads.Bead,
 	store beads.Store,
 	clk clock.Clock,
+	extraMetadata ...map[string]string,
 ) (newGen int, token string, err error) {
 	name := session.Metadata["session_name"]
 	if !sessions.IsSessionNameSyntaxValid(name) {
@@ -65,6 +66,11 @@ func preWakeCommit(
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
 	})
+	for _, extra := range extraMetadata {
+		for key, value := range extra {
+			batch[key] = value
+		}
+	}
 	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}

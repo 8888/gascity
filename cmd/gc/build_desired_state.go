@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -453,7 +454,8 @@ func buildDesiredStateWithSessionBeads(
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
 	if store != nil {
-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads)
+		readyCache := newControllerDemandReadyCache()
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads, readyCache)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -466,24 +468,22 @@ func buildDesiredStateWithSessionBeads(
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
-		if len(defaultScaleTargets) > 0 {
-			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
-			for _, err := range errs {
+		if len(defaultScaleTargets) > 0 || len(defaultNamedScaleTargets) > 0 {
+			var defaultCounts map[string]int
+			var poolPartials map[string]bool
+			var poolErrs []error
+			var namedErrs []error
+			defaultCounts, poolPartials, poolErrs, namedDefaultDemand, namedScaleCheckPartialTemplates, namedErrs = defaultScaleCheckCountsAndNamedDemand(defaultScaleTargets, defaultNamedScaleTargets, cfg, cityName, readyCache)
+			for _, err := range poolErrs {
 				fmt.Fprintf(stderr, "buildDesiredState: %v (using new demand=0)\n", err) //nolint:errcheck
 			}
-			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, partialTemplates)
-			for template, count := range defaultCounts {
-				scaleCheckCounts[template] = count
-			}
-		}
-		if len(defaultNamedScaleTargets) > 0 {
-			var namedErrs []error
-			var partialTemplates map[string]bool
-			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName)
 			for _, err := range namedErrs {
 				fmt.Fprintf(stderr, "buildDesiredState: %v (using named demand=false)\n", err) //nolint:errcheck
 			}
-			namedScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(namedScaleCheckPartialTemplates, partialTemplates)
+			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, poolPartials)
+			for template, count := range defaultCounts {
+				scaleCheckCounts[template] = count
+			}
 		}
 		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, poolScaleCheckPartialTemplates)
 		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
@@ -726,6 +726,7 @@ func collectAssignedWorkBeadsWithStores(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	sessionBeads *sessionBeadSnapshot,
+	readyCaches ...*controllerDemandReadyCache,
 ) ([]beads.Bead, []beads.Store, []string, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
@@ -797,6 +798,14 @@ func collectAssignedWorkBeadsWithStores(
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, partial
 	}
+	var readyCache *controllerDemandReadyCache
+	if len(readyCaches) > 0 {
+		readyCache = readyCaches[0]
+	}
+	assigneeFilter := make(map[string]struct{}, len(assignees))
+	for _, assignee := range assignees {
+		assigneeFilter[assignee] = struct{}{}
+	}
 
 	readyResults := make([]storeAssignedWorkResult, len(stores))
 	for idx, source := range stores {
@@ -807,18 +816,27 @@ func collectAssignedWorkBeadsWithStores(
 			var ready []beads.Bead
 			var err error
 			var errs []error
-			if len(assignees) == 0 {
+			if len(assigneeFilter) > 0 {
+				ready, err = readyForControllerDemandCached(source.store, readyCache)
+				if err != nil && beads.IsPartialResult(err) {
+					ready = nil
+					for _, assignee := range assignees {
+						part, partErr := readyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
+						if partErr != nil {
+							errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
+						}
+						ready = append(ready, part...)
+					}
+				} else {
+					if err != nil {
+						errs = append(errs, fmt.Errorf("Ready(): %w", err))
+					}
+					ready = filterReadyAssignedWorkByAssignee(ready, assigneeFilter)
+				}
+			} else {
 				ready, err = readyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
-				}
-			} else {
-				for _, assignee := range assignees {
-					part, partErr := readyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
-					if partErr != nil {
-						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
-					}
-					ready = append(ready, part...)
 				}
 			}
 			var readyBeads []beads.Bead
@@ -840,6 +858,19 @@ func collectAssignedWorkBeadsWithStores(
 		}
 	}
 	return result, resultStores, resultStoreRefs, partial
+}
+
+func filterReadyAssignedWorkByAssignee(ready []beads.Bead, assigneeFilter map[string]struct{}) []beads.Bead {
+	if len(assigneeFilter) == 0 {
+		return ready
+	}
+	filtered := ready[:0]
+	for _, bead := range ready {
+		if _, ok := assigneeFilter[strings.TrimSpace(bead.Assignee)]; ok {
+			filtered = append(filtered, bead)
+		}
+	}
+	return filtered
 }
 
 func assignedWorkReadyLimit(cfg *config.City) int {
@@ -959,151 +990,165 @@ func defaultScaleCheckTargetForAgent(
 // generic pool demand. Assigned beads are handled by assigned-work collection
 // and named-session demand so they are intentionally excluded here.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
-	counts := make(map[string]int, len(targets))
-	if len(targets) == 0 {
-		return counts, nil, nil
-	}
-
-	type scaleStoreGroup struct {
-		store     beads.Store
-		templates map[string]struct{}
-	}
-	groups := make(map[string]*scaleStoreGroup)
-	var errs []error
-	var partialTemplates map[string]bool
-	for _, target := range targets {
-		template := strings.TrimSpace(target.template)
-		if template == "" {
-			continue
-		}
-		counts[template] = 0
-		if target.err != nil {
-			errs = append(errs, target.err)
-			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
-		}
-		if target.store == nil {
-			if target.err == nil {
-				errs = append(errs, fmt.Errorf("default scale_check %s: store unavailable", template))
-			}
-			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
-			continue
-		}
-		key := strings.TrimSpace(target.storeKey)
-		if key == "" {
-			key = fmt.Sprintf("%p", target.store)
-		}
-		group := groups[key]
-		if group == nil {
-			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
-			groups[key] = group
-		}
-		group.templates[template] = struct{}{}
-	}
-
-	for key, group := range groups {
-		ready, err := readyForControllerDemand(group.store)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
-			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
-			if !beads.IsPartialResult(err) || len(ready) == 0 {
-				continue
-			}
-		}
-		for _, b := range ready {
-			if strings.TrimSpace(b.Assignee) != "" {
-				continue
-			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
-			if _, ok := group.templates[template]; ok {
-				counts[template]++
-			}
-		}
-	}
-	return counts, partialTemplates, errs
+	counts, partials, errs, _, _, _ := defaultScaleCheckCountsAndNamedDemand(targets, nil, nil, "")
+	return counts, partials, errs
 }
 
 func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.City, cityName string) (map[string]bool, map[string]bool, []error) {
-	demand := make(map[string]bool)
 	if len(targets) == 0 || cfg == nil {
-		return demand, nil, nil
+		return make(map[string]bool), nil, nil
+	}
+	_, _, _, demand, partials, errs := defaultScaleCheckCountsAndNamedDemand(nil, targets, cfg, cityName)
+	return demand, partials, errs
+}
+
+type defaultScaleStoreGroup struct {
+	store          beads.Store
+	poolTemplates  map[string]struct{}
+	namedTemplates map[string]struct{}
+}
+
+func defaultScaleCheckCountsAndNamedDemand(
+	poolTargets []defaultScaleCheckTarget,
+	namedTargets []defaultScaleCheckTarget,
+	cfg *config.City,
+	cityName string,
+	readyCaches ...*controllerDemandReadyCache,
+) (map[string]int, map[string]bool, []error, map[string]bool, map[string]bool, []error) {
+	counts := make(map[string]int, len(poolTargets))
+	demand := make(map[string]bool)
+	if cfg == nil {
+		namedTargets = nil
+	}
+	if len(poolTargets) == 0 && len(namedTargets) == 0 {
+		return counts, nil, nil, demand, nil, nil
 	}
 
-	type scaleStoreGroup struct {
-		store     beads.Store
-		templates map[string]struct{}
-	}
-	groups := make(map[string]*scaleStoreGroup)
-	var errs []error
-	var partialTemplates map[string]bool
-	for _, target := range targets {
-		template := strings.TrimSpace(target.template)
-		if template == "" {
-			continue
-		}
-		if target.err != nil {
-			errs = append(errs, target.err)
-			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
-		}
-		if target.store == nil {
-			if target.err == nil {
-				errs = append(errs, fmt.Errorf("default scale_check %s: store unavailable", template))
+	groups := make(map[string]*defaultScaleStoreGroup)
+	var poolErrs []error
+	var namedErrs []error
+	var poolPartials map[string]bool
+	var namedPartials map[string]bool
+	collect := func(targets []defaultScaleCheckTarget, named bool) {
+		for _, target := range targets {
+			template := strings.TrimSpace(target.template)
+			if template == "" {
+				continue
 			}
-			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
-			continue
+			if !named {
+				counts[template] = 0
+			}
+			if target.err != nil {
+				if named {
+					namedErrs = append(namedErrs, target.err)
+					namedPartials = markScaleCheckPartialTemplate(namedPartials, template)
+				} else {
+					poolErrs = append(poolErrs, target.err)
+					poolPartials = markScaleCheckPartialTemplate(poolPartials, template)
+				}
+			}
+			if target.store == nil {
+				if target.err == nil {
+					err := fmt.Errorf("default scale_check %s: store unavailable", template)
+					if named {
+						namedErrs = append(namedErrs, err)
+					} else {
+						poolErrs = append(poolErrs, err)
+					}
+				}
+				if named {
+					namedPartials = markScaleCheckPartialTemplate(namedPartials, template)
+				} else {
+					poolPartials = markScaleCheckPartialTemplate(poolPartials, template)
+				}
+				continue
+			}
+			key := strings.TrimSpace(target.storeKey)
+			if key == "" {
+				key = fmt.Sprintf("%p", target.store)
+			}
+			group := groups[key]
+			if group == nil {
+				group = &defaultScaleStoreGroup{
+					store:          target.store,
+					poolTemplates:  make(map[string]struct{}),
+					namedTemplates: make(map[string]struct{}),
+				}
+				groups[key] = group
+			}
+			if named {
+				group.namedTemplates[template] = struct{}{}
+			} else {
+				group.poolTemplates[template] = struct{}{}
+			}
 		}
-		key := strings.TrimSpace(target.storeKey)
-		if key == "" {
-			key = fmt.Sprintf("%p", target.store)
-		}
-		group := groups[key]
-		if group == nil {
-			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
-			groups[key] = group
-		}
-		group.templates[template] = struct{}{}
 	}
+	collect(poolTargets, false)
+	collect(namedTargets, true)
 
 	namedByIdentity := make(map[string]namedSessionSpec)
 	identitiesByTemplate := make(map[string][]string)
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
-		if !ok || spec.Mode == "always" {
-			continue
+	if cfg != nil && len(namedTargets) > 0 {
+		for i := range cfg.NamedSessions {
+			identity := cfg.NamedSessions[i].QualifiedName()
+			spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+			if !ok || spec.Mode == "always" {
+				continue
+			}
+			template := strings.TrimSpace(namedSessionBackingTemplate(spec))
+			if template == "" {
+				continue
+			}
+			namedByIdentity[spec.Identity] = spec
+			identitiesByTemplate[template] = append(identitiesByTemplate[template], spec.Identity)
 		}
-		template := strings.TrimSpace(namedSessionBackingTemplate(spec))
-		if template == "" {
-			continue
-		}
-		namedByIdentity[spec.Identity] = spec
-		identitiesByTemplate[template] = append(identitiesByTemplate[template], spec.Identity)
+	}
+	var readyCache *controllerDemandReadyCache
+	if len(readyCaches) > 0 {
+		readyCache = readyCaches[0]
 	}
 
 	for key, group := range groups {
-		ready, err := readyForControllerDemand(group.store)
+		ready, err := readyForControllerDemandCached(group.store, readyCache)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
-			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
+			if len(group.poolTemplates) > 0 {
+				poolErrs = append(poolErrs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.poolTemplates), ","), err))
+				poolPartials = markScaleCheckPartialSet(poolPartials, group.poolTemplates)
+			}
+			if len(group.namedTemplates) > 0 {
+				namedErrs = append(namedErrs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.namedTemplates), ","), err))
+				namedPartials = markScaleCheckPartialSet(namedPartials, group.namedTemplates)
+			}
 			if !beads.IsPartialResult(err) || len(ready) == 0 {
 				continue
 			}
 		}
 		for _, b := range ready {
-			if strings.TrimSpace(b.Assignee) != "" {
+			if !defaultControllerDemandBeadActionable(b) {
 				continue
 			}
+			assignee := strings.TrimSpace(b.Assignee)
 			routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
 			if routedTo == "" {
 				continue
 			}
+			if _, ok := group.poolTemplates[routedTo]; ok && (assignee == "" || assignee == routedTo) {
+				counts[routedTo]++
+			}
+			if assignee != "" {
+				continue
+			}
+			if len(group.namedTemplates) == 0 {
+				continue
+			}
 			if spec, ok := namedByIdentity[routedTo]; ok {
 				template := strings.TrimSpace(namedSessionBackingTemplate(spec))
-				if _, targetTemplate := group.templates[template]; targetTemplate {
+				if _, targetTemplate := group.namedTemplates[template]; targetTemplate {
 					demand[spec.Identity] = true
 				}
 				continue
 			}
-			if _, targetTemplate := group.templates[routedTo]; !targetTemplate {
+			if _, targetTemplate := group.namedTemplates[routedTo]; !targetTemplate {
 				continue
 			}
 			identities := identitiesByTemplate[routedTo]
@@ -1112,7 +1157,12 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 			}
 		}
 	}
-	return demand, partialTemplates, errs
+
+	return counts, poolPartials, poolErrs, demand, namedPartials, namedErrs
+}
+
+func defaultControllerDemandBeadActionable(b beads.Bead) bool {
+	return strings.TrimSpace(b.Type) != "epic"
 }
 
 func markScaleCheckPartialTemplate(partials map[string]bool, template string) map[string]bool {
@@ -1213,8 +1263,79 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 	return beads.HandlesFor(store).Cached.List(query)
 }
 
+type controllerDemandReadyCache struct {
+	mu    sync.Mutex
+	ready map[string]controllerDemandReadyResult
+}
+
+type controllerDemandReadyResult struct {
+	rows []beads.Bead
+	err  error
+}
+
+func newControllerDemandReadyCache() *controllerDemandReadyCache {
+	return &controllerDemandReadyCache{
+		ready: make(map[string]controllerDemandReadyResult),
+	}
+}
+
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
 	return beads.HandlesFor(store).Cached.Ready()
+}
+
+func readyForControllerDemandCached(store beads.Store, cache *controllerDemandReadyCache) ([]beads.Bead, error) {
+	if cache == nil || store == nil {
+		return readyForControllerDemand(store)
+	}
+	cacheKey, ok := controllerDemandReadyCacheKey(store)
+	if !ok {
+		return readyForControllerDemand(store)
+	}
+	cache.mu.Lock()
+	if cached, ok := cache.ready[cacheKey]; ok {
+		cache.mu.Unlock()
+		return cloneBeadsForControllerDemand(cached.rows), cached.err
+	}
+	cache.mu.Unlock()
+
+	rows, err := readyForControllerDemand(store)
+	cachedRows := cloneBeadsForControllerDemand(rows)
+
+	cache.mu.Lock()
+	if cached, ok := cache.ready[cacheKey]; ok {
+		cache.mu.Unlock()
+		return cloneBeadsForControllerDemand(cached.rows), cached.err
+	}
+	cache.ready[cacheKey] = controllerDemandReadyResult{rows: cachedRows, err: err}
+	cache.mu.Unlock()
+	return cloneBeadsForControllerDemand(cachedRows), err
+}
+
+func controllerDemandReadyCacheKey(store beads.Store) (string, bool) {
+	value := reflect.ValueOf(store)
+	if !value.IsValid() || value.Kind() != reflect.Ptr || value.IsNil() {
+		return "", false
+	}
+	return fmt.Sprintf("%T:%x", store, value.Pointer()), true
+}
+
+func cloneBeadsForControllerDemand(rows []beads.Bead) []beads.Bead {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]beads.Bead, len(rows))
+	copy(out, rows)
+	for i := range out {
+		out[i].Labels = append([]string(nil), rows[i].Labels...)
+		out[i].Metadata = cloneStringMap(rows[i].Metadata)
+		out[i].Dependencies = append([]beads.Dep(nil), rows[i].Dependencies...)
+		out[i].Needs = append([]string(nil), rows[i].Needs...)
+		if rows[i].Priority != nil {
+			priority := *rows[i].Priority
+			out[i].Priority = &priority
+		}
+	}
+	return out
 }
 
 func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {

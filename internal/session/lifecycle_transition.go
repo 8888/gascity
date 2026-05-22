@@ -205,7 +205,9 @@ func ConfirmStartedPatch(now time.Time) MetadataPatch {
 // state active. Now is used to stamp creation_complete_at whenever it is
 // non-zero (independent of ConfirmState, so the recovery path that commits
 // a fresh start on an already-active bead still refreshes the sweep's
-// post-create marker). ClearPendingCreateClaim folds the
+// post-create marker). ConfirmState also clears pending_create_started_at
+// because the provider start attempt is complete even when no durable
+// pending_create_claim was used. ClearPendingCreateClaim folds the
 // pending_create_claim clear into the same atomic batch so downstream
 // readers (e.g. the pool bead sweep) never observe a transient state
 // where the claim is gone but the post-create marker hasn't landed yet.
