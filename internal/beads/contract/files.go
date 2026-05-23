@@ -172,6 +172,24 @@ func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 	return false, nil
 }
 
+// ReadDoltLocalOnly reports whether dolt.local-only is explicitly enabled.
+func ReadDoltLocalOnly(fs fsys.FS, path string) (bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if value, ok := scanConfigLineValue(fs, path, "dolt.local-only:"); ok {
+			return value == "true", nil
+		}
+		return false, err
+	}
+	if value, ok := configStringValue(mappingRoot(doc), "dolt.local-only"); ok {
+		return value == "true", nil
+	}
+	return false, nil
+}
+
 // ReadExportAuto returns the configured value of export.auto along with a
 // presence indicator. ok=false means the key is absent from the config OR
 // the value is not a recognized boolean (the upstream bd default is true).
