@@ -1728,6 +1728,9 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			continue
 		}
 		result = append(result, bead)
+		if q.Limit > 0 && len(result) >= q.Limit {
+			break
+		}
 	}
 	if q.Limit > 0 && len(result) > q.Limit {
 		result = result[:q.Limit]
