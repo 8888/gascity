@@ -1928,7 +1928,7 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 	}
 }
 
-func TestBdStoreReadyLimitAppliesAfterSyntheticFiltering(t *testing.T) {
+func TestBdStoreReadyDoesNotSpecialCaseSyntheticMetadata(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
@@ -1949,8 +1949,8 @@ func TestBdStoreReadyLimitAppliesAfterSyntheticFiltering(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("Ready(limit) returned %d beads, want 1", len(got))
 	}
-	if got[0].ID != "bd-task" {
-		t.Fatalf("Ready(limit)[0].ID = %q, want bd-task", got[0].ID)
+	if got[0].ID != "bd-synthetic" {
+		t.Fatalf("Ready(limit)[0].ID = %q, want bd-synthetic", got[0].ID)
 	}
 }
 
