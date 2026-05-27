@@ -149,6 +149,39 @@ progressLoop:
 	return sc, nil
 }
 
+// HistogramSnapshot returns a deep copy of the operation histograms collected
+// so far.
+func (r *Runner) HistogramSnapshot() map[string]*OperationResult {
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
+
+	out := make(map[string]*OperationResult, len(r.results))
+	for name, res := range r.results {
+		if res == nil {
+			continue
+		}
+		cp := *res
+		cp.H = res.H.clone()
+		out[name] = &cp
+	}
+	return out
+}
+
+// SeedSnapshot returns a read-only copy of the runner's live seed population.
+// Slices are cloned so callers (tests) can inspect post-run population sizes
+// without racing the workload goroutines. Exposed for steady-state population
+// assertions (design ga-sftyt NFR-3); the mutable r.seed is never exported.
+func (r *Runner) SeedSnapshot() SeedResult {
+	r.seedMu.RLock()
+	defer r.seedMu.RUnlock()
+	return SeedResult{
+		MainOpenIDs:   append([]string(nil), r.seed.MainOpenIDs...),
+		MainClosedIDs: append([]string(nil), r.seed.MainClosedIDs...),
+		WispOpenIDs:   append([]string(nil), r.seed.WispOpenIDs...),
+		DepEdges:      append([]Dep(nil), r.seed.DepEdges...),
+	}
+}
+
 // opTag identifies which operation a goroutine will execute.
 type opTag int
 
@@ -163,6 +196,9 @@ const (
 	opReady
 	opDepOp
 	opRecentScan
+	opClose
+	opDeleteWisp
+	opPurgeExpired
 )
 
 // buildSchedule creates a weighted list of operations proportional to their
@@ -186,6 +222,9 @@ func (r *Runner) buildSchedule() []opTag {
 		{opReady, wl.ReadyRate, len(r.seed.MainOpenIDs) > 0},
 		{opDepOp, wl.DepOpRate, len(r.seed.MainOpenIDs) >= 2},
 		{opRecentScan, wl.RecentScanRate, true},
+		{opClose, wl.CloseRate, wl.CloseRate > 0 && len(r.seed.MainOpenIDs) > 100},
+		{opDeleteWisp, wl.WispDeleteRate, wl.WispDeleteRate > 0 && len(r.seed.WispOpenIDs) > 100},
+		{opPurgeExpired, wl.PurgeExpiredRate, wl.PurgeExpiredRate > 0},
 	}
 
 	var schedule []opTag
@@ -365,6 +404,70 @@ func (r *Runner) execOp(ctx context.Context, op opTag, rng *rand.Rand) error {
 		// FR-18: recent records by created_at DESC.
 		_, err := a.RecentScan(ctx, 50)
 		return r.recordOpErr("RecentScan", err)
+
+	case opClose:
+		// Lifecycle (design ga-sftyt): close an open main-tier task (Update ->
+		// closed) and pop it from the open pool. Closed IDs are tracked (capped at
+		// 50k so the tracker itself stays bounded) for future retention ops; the
+		// record stays resident, modeling long-lived closed tasks. A floor guard
+		// keeps the open pool from draining below 100. The ID is removed under the
+		// lock so no other goroutine closes it; the adapter is called unlocked.
+		r.seedMu.Lock()
+		if len(seed.MainOpenIDs) <= 100 {
+			r.seedMu.Unlock()
+			return nil
+		}
+		idx := rng.IntN(len(seed.MainOpenIDs))
+		id := seed.MainOpenIDs[idx]
+		last := len(seed.MainOpenIDs) - 1
+		seed.MainOpenIDs[idx] = seed.MainOpenIDs[last]
+		seed.MainOpenIDs = seed.MainOpenIDs[:last]
+		r.seedMu.Unlock()
+
+		if err := a.Update(ctx, id, Update{Status: "closed"}); err != nil {
+			if IsNotFound(err) {
+				return nil // raced with a concurrent close
+			}
+			return r.recordOpErr("Close", err)
+		}
+		r.seedMu.Lock()
+		if len(seed.MainClosedIDs) < 50000 {
+			seed.MainClosedIDs = append(seed.MainClosedIDs, id)
+		}
+		r.seedMu.Unlock()
+		return nil
+
+	case opDeleteWisp:
+		// Lifecycle (design ga-sftyt): delete an open ephemeral record (mail
+		// archival / order cancellation) and pop it from the open pool. Wisp
+		// deletes ≈ wisp creates so the ephemeral population plateaus. Floor guard
+		// keeps the pool from draining below 100.
+		r.seedMu.Lock()
+		if len(seed.WispOpenIDs) <= 100 {
+			r.seedMu.Unlock()
+			return nil
+		}
+		idx := rng.IntN(len(seed.WispOpenIDs))
+		id := seed.WispOpenIDs[idx]
+		last := len(seed.WispOpenIDs) - 1
+		seed.WispOpenIDs[idx] = seed.WispOpenIDs[last]
+		seed.WispOpenIDs = seed.WispOpenIDs[:last]
+		r.seedMu.Unlock()
+
+		if err := a.Delete(ctx, id); err != nil {
+			if IsNotFound(err) {
+				return nil // raced with PurgeExpired or another goroutine
+			}
+			return r.recordOpErr("DeleteWisp", err)
+		}
+		return nil
+
+	case opPurgeExpired:
+		// Lifecycle (design ga-sftyt): TTL sweep of expired order-tracking wisps.
+		// Removes records by their already-past ExpiresAt; it must NOT touch the
+		// seed trackers, which hold live IDs only.
+		_, err := a.PurgeExpired(ctx)
+		return r.recordOpErr("PurgeExpired", err)
 	}
 	return nil
 }
@@ -416,6 +519,12 @@ func opName(op opTag) string {
 		return "DepAdd"
 	case opRecentScan:
 		return "RecentScan"
+	case opClose:
+		return "Close"
+	case opDeleteWisp:
+		return "DeleteWisp"
+	case opPurgeExpired:
+		return "PurgeExpired"
 	}
 	return "unknown"
 }
