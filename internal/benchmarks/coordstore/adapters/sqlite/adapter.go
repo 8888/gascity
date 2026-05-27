@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,18 @@ type Adapter struct {
 	driverName  string
 	pragmaSQL   string
 	idPrefix    string
+
+	// dbPath records the on-disk store.db location so Stats can report the
+	// WAL / SHM / DB file sizes — these dominate the cgroup memory footprint
+	// in WAL mode and are not visible from database/sql.Stats().
+	dbPath string
+
+	// checkpointCancel stops the background wal_checkpoint(TRUNCATE) loop on
+	// Close. checkpointDone closes when the loop has fully exited so Close
+	// can wait without leaking the goroutine. When the background loop is
+	// disabled (interval <= 0), both fields stay nil.
+	checkpointCancel context.CancelFunc
+	checkpointDone   chan struct{}
 }
 
 // New returns an Adapter. Call Open before using it.
@@ -122,11 +135,72 @@ func (a *Adapter) Open(ctx context.Context, cfg coordstore.Config) error {
 	a.readDB = readDB
 	a.stmtGetMain = stmtGetMain
 	a.stmtGetEph = stmtGetEph
+	a.dbPath = path
+	a.startCheckpointer(checkpointIntervalFromEnv())
 	return nil
+}
+
+// checkpointIntervalFromEnv resolves the cadence for the background
+// wal_checkpoint(TRUNCATE) loop. Empty env → defaultCheckpointInterval;
+// "0" or "off" → loop disabled; anything else → time.ParseDuration.
+func checkpointIntervalFromEnv() time.Duration {
+	v := strings.TrimSpace(os.Getenv("COORDSTORE_SQLITE_CHECKPOINT_INTERVAL"))
+	if v == "" {
+		return defaultCheckpointInterval
+	}
+	if v == "0" || strings.EqualFold(v, "off") {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return defaultCheckpointInterval
+	}
+	return d
+}
+
+// startCheckpointer launches a goroutine that calls PRAGMA wal_checkpoint
+// (TRUNCATE) on the write connection at the given interval. The TRUNCATE
+// mode is the only one that actually shrinks the on-disk WAL file —
+// PASSIVE / FULL leave it at its high-water mark, which is the failure
+// mode the ga-2s6sz spike exists to fix. A non-positive interval is a
+// no-op: useful for unit tests that want the legacy "no background work"
+// behavior, and for ablation experiments that need to isolate the effect.
+func (a *Adapter) startCheckpointer(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.checkpointCancel = cancel
+	a.checkpointDone = make(chan struct{})
+	go func() {
+		defer close(a.checkpointDone)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				// Best-effort: checkpoint contention with active readers can
+				// cause SQLITE_BUSY here, but the next tick retries. The
+				// pragma writes a 3-column result set (busy, log, checkpointed)
+				// that we intentionally discard — the win is bounded WAL,
+				// not telemetry from this call. The actual WAL size is
+				// captured via Stats() each sample.
+				_, _ = a.writeDB.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE);")
+			}
+		}
+	}()
 }
 
 // Close releases all database connections and prepared statements.
 func (a *Adapter) Close() error {
+	if a.checkpointCancel != nil {
+		a.checkpointCancel()
+		<-a.checkpointDone
+		a.checkpointCancel = nil
+		a.checkpointDone = nil
+	}
 	var errs []string
 	if a.stmtGetMain != nil {
 		if err := a.stmtGetMain.Close(); err != nil {
@@ -640,14 +714,31 @@ func (a *Adapter) RecentScan(ctx context.Context, limit int) ([]coordstore.Recor
 	return scanMainRows(rows)
 }
 
-// Stats returns SQLite-level diagnostics.
+// Stats returns SQLite-level diagnostics. In addition to the database/sql
+// pool stats it includes the on-disk sizes of the database, WAL, and
+// shared-memory index files — these dominate the cgroup memory accounting
+// in WAL mode and are the metric the ga-2s6sz spike is gated on. Missing
+// or unreadable files are reported as zero; the function never returns an
+// error so it remains safe to call from the telemetry hot path.
 func (a *Adapter) Stats(_ context.Context) map[string]int64 {
 	stats := a.readDB.Stats()
-	return map[string]int64{
+	out := map[string]int64{
 		"open_connections": int64(stats.OpenConnections),
 		"in_use":           int64(stats.InUse),
 		"idle":             int64(stats.Idle),
 	}
+	if a.dbPath != "" {
+		if fi, err := os.Stat(a.dbPath); err == nil {
+			out["db_size_bytes"] = fi.Size()
+		}
+		if fi, err := os.Stat(a.dbPath + "-wal"); err == nil {
+			out["wal_size_bytes"] = fi.Size()
+		}
+		if fi, err := os.Stat(a.dbPath + "-shm"); err == nil {
+			out["shm_size_bytes"] = fi.Size()
+		}
+	}
+	return out
 }
 
 // --- helpers ---
@@ -866,15 +957,25 @@ PRAGMA wal_autocheckpoint=0;
 `
 
 // FullSyncPragmas are applied by the sqlite-cgo adapter for fsync-on-commit
-// durability.
+// durability under sustained load. mmap_size=0 keeps the database file out
+// of the cgroup mmap accounting; wal_autocheckpoint=1000 hands SQLite the
+// canonical 1000-page (~4MB) auto-checkpoint trigger from the writer side,
+// which combined with the background TRUNCATE loop bounds the WAL file
+// (refs ga-2s6sz).
 const FullSyncPragmas = `
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=FULL;
 PRAGMA cache_size=-65536;
 PRAGMA temp_store=MEMORY;
-PRAGMA mmap_size=268435456;
-PRAGMA wal_autocheckpoint=0;
+PRAGMA mmap_size=0;
+PRAGMA wal_autocheckpoint=1000;
 `
+
+// defaultCheckpointInterval is the cadence at which the background
+// wal_checkpoint(TRUNCATE) loop runs when enabled. It can be overridden per
+// process via COORDSTORE_SQLITE_CHECKPOINT_INTERVAL (any value accepted by
+// time.ParseDuration; "0" or "off" disables the loop).
+const defaultCheckpointInterval = 30 * time.Second
 
 // schema defines all tables and indexes. Applied once at Open.
 const schema = `
