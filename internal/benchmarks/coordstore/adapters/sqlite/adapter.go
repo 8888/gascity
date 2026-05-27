@@ -947,13 +947,17 @@ func (a *Adapter) openSettings() (string, string) {
 const DefaultDriverName = "sqlite"
 
 // DefaultPragmas are applied once after opening the pure-Go SQLite database.
+// wal_autocheckpoint=1000 re-enables SQLite's canonical 1000-page (~4MB)
+// writer-side checkpoint; mmap_size=0 removes the 256MB cgroup mmap charge.
+// Both were explicitly disabled before this fix and caused the ga-4advr OOM
+// at 32m22s under MemoryMax=8G. See ga-qe54tg for the full rationale.
 const DefaultPragmas = `
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA cache_size=-65536;
 PRAGMA temp_store=MEMORY;
-PRAGMA mmap_size=268435456;
-PRAGMA wal_autocheckpoint=0;
+PRAGMA mmap_size=0;
+PRAGMA wal_autocheckpoint=1000;
 `
 
 // FullSyncPragmas are applied by the sqlite-cgo adapter for fsync-on-commit
