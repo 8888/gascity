@@ -916,6 +916,14 @@
           "type": "string",
           "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
           "default": "bd"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "dolt",
+            "bbolt"
+          ],
+          "description": "Backend selects the storage engine for the managed bd provider.\nEmpty or \"dolt\" uses the default managed Dolt backend. \"bbolt\" uses an\nembedded bbolt file and does not start a Dolt server. Ignored when\nProvider is \"file\" or \"exec:\u003cscript\u003e\"."
         }
       },
       "additionalProperties": false,

@@ -1190,6 +1190,8 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	switch provider {
 	case "file":
 		return openCompatibleFileStore(scopeRoot, runtimeCityPath)
+	case "bbolt":
+		return openBboltStoreAt(scopeRoot, runtimeCityPath)
 	default: // "bd" or unrecognized → use bd
 		if _, err := exec.LookPath("bd"); err != nil {
 			return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
@@ -1225,4 +1227,13 @@ func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
 		cfg = nil
 	}
 	return bdStoreForRig(storePath, cityPath, cfg), nil
+}
+
+func openBboltStoreAt(storePath, cityPath string) (beads.Store, error) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		cfg = nil
+	}
+	prefix := issuePrefixForScope(storePath, cityPath, cfg)
+	return beads.OpenSharedBboltStore(beads.BboltStorePath(storePath), beads.WithBboltStoreIDPrefix(prefix))
 }

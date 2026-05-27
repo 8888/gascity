@@ -457,6 +457,10 @@ func configuredBeadsProviderValue(cityPath string) string {
 	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
 }
 
+func configuredBeadsBackendValue(cityPath string) string {
+	return strings.ToLower(strings.TrimSpace(peekBeadsBackend(filepath.Join(cityPath, "city.toml"))))
+}
+
 func scopedBeadsProviderOverride(cityPath, scopeRoot string) (string, bool) {
 	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
 	if provider == "" {
@@ -494,15 +498,30 @@ func normalizeRawBeadsProvider(cityPath, provider string) string {
 // The city-managed lifecycle wrapper normalizes back to "bd" so nested agent
 // sessions do not re-inherit exec:gc-beads-bd for raw data operations.
 func rawBeadsProvider(cityPath string) string {
+	provider := "bd"
 	if provider := configuredBeadsProviderValue(cityPath); provider != "" {
-		return normalizeRawBeadsProvider(cityPath, provider)
+		normalized := normalizeRawBeadsProvider(cityPath, provider)
+		if providerUsesBdStoreContract(normalized) && configuredBeadsBackendValue(cityPath) == "bbolt" {
+			return "bbolt"
+		}
+		return normalized
 	}
-	return "bd"
+	if providerUsesBdStoreContract(provider) && configuredBeadsBackendValue(cityPath) == "bbolt" {
+		return "bbolt"
+	}
+	return provider
 }
 
 func rawBeadsProviderFromConfig(cityPath string) string {
 	if provider := strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml"))); provider != "" {
-		return normalizeRawBeadsProvider(cityPath, provider)
+		normalized := normalizeRawBeadsProvider(cityPath, provider)
+		if providerUsesBdStoreContract(normalized) && configuredBeadsBackendValue(cityPath) == "bbolt" {
+			return "bbolt"
+		}
+		return normalized
+	}
+	if configuredBeadsBackendValue(cityPath) == "bbolt" {
+		return "bbolt"
 	}
 	return "bd"
 }
@@ -534,6 +553,9 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 	provider := rawBeadsProvider(runtimeCityPath)
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
+	}
+	if provider == "bbolt" {
+		return provider
 	}
 	if samePath(resolvedScopeRoot, runtimeCityPath) {
 		return provider

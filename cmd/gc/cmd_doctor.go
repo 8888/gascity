@@ -190,6 +190,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoltDriftCheck(cityPath, cfg))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
+		register(doctor.NewCoordStoreBackendCheck(cityPath, cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))

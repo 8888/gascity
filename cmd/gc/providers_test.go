@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +91,188 @@ func TestRawBeadsProviderPreservesCustomExecOverride(t *testing.T) {
 
 	if got := rawBeadsProvider(t.TempDir()); got != "exec:/tmp/custom-beads" {
 		t.Fatalf("rawBeadsProvider() = %q, want custom exec override", got)
+	}
+}
+
+func TestRawBeadsProviderUsesBboltBackendForManagedProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+backend = "bbolt"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rawBeadsProvider(cityDir); got != "bbolt" {
+		t.Fatalf("rawBeadsProvider() = %q, want bbolt", got)
+	}
+	if got := beadsProvider(cityDir); got != "bbolt" {
+		t.Fatalf("beadsProvider() = %q, want bbolt", got)
+	}
+}
+
+func TestRawBeadsProviderIgnoresBboltBackendForFileProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+backend = "bbolt"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rawBeadsProvider(cityDir); got != "file" {
+		t.Fatalf("rawBeadsProvider() = %q, want file", got)
+	}
+}
+
+func TestRawBeadsProviderForScopeBboltIgnoresLegacyScopeMarkers(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+backend = "bbolt"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rawBeadsProviderForScope(rigDir, cityDir); got != "bbolt" {
+		t.Fatalf("rawBeadsProviderForScope() = %q, want bbolt", got)
+	}
+}
+
+func TestOpenStoreAtForCityUsesBboltBackend(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+prefix = "dm"
+
+[beads]
+backend = "bbolt"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	bboltStore, ok := store.(*beads.BboltStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.BboltStore", store)
+	}
+	t.Cleanup(func() {
+		if err := bboltStore.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
+	created, err := store.Create(beads.Bead{Title: "work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !strings.HasPrefix(created.ID, "dm-") {
+		t.Fatalf("created ID = %q, want dm-*", created.ID)
+	}
+	if _, err := os.Stat(beads.BboltStorePath(cityDir)); err != nil {
+		t.Fatalf("stat bbolt store: %v", err)
+	}
+}
+
+func TestOpenStoreAtForCityReusesBboltBackendInProcess(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+prefix = "dm"
+
+[beads]
+backend = "bbolt"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity first: %v", err)
+	}
+	bboltStore, ok := first.(*beads.BboltStore)
+	if !ok {
+		t.Fatalf("first store type = %T, want *beads.BboltStore", first)
+	}
+	t.Cleanup(func() {
+		if err := bboltStore.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
+	created, err := first.Create(beads.Bead{Title: "work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	second, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity second: %v", err)
+	}
+	got, err := second.Get(created.ID)
+	if err != nil {
+		t.Fatalf("second.Get(%q): %v", created.ID, err)
+	}
+	if got.Title != "work" {
+		t.Fatalf("second.Get title = %q, want work", got.Title)
+	}
+}
+
+func TestStartBeadsLifecycleBboltCreatesStoreWithoutBeadsDir(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+prefix = "dm"
+
+[beads]
+backend = "bbolt"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "dm"},
+		Beads:     config.BeadsConfig{Backend: "bbolt"},
+	}
+
+	if err := startBeadsLifecycle(cityDir, "", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+	if _, err := os.Stat(beads.BboltStorePath(cityDir)); err != nil {
+		t.Fatalf("bbolt store was not created: %v", err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	bboltStore, ok := store.(*beads.BboltStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.BboltStore", store)
+	}
+	t.Cleanup(func() {
+		if err := bboltStore.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")); !os.IsNotExist(err) {
+		t.Fatalf("managed Dolt runtime exists after bbolt startup, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf(".beads exists after bbolt startup, err=%v", err)
 	}
 }
 

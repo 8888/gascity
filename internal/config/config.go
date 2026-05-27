@@ -1137,6 +1137,11 @@ type BeadsConfig struct {
 	// Provider selects the bead store backend: "bd" (default), "file",
 	// or "exec:<script>" for a user-supplied script.
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
+	// Backend selects the storage engine for the managed bd provider.
+	// Empty or "dolt" uses the default managed Dolt backend. "bbolt" uses an
+	// embedded bbolt file and does not start a Dolt server. Ignored when
+	// Provider is "file" or "exec:<script>".
+	Backend string `toml:"backend,omitempty" jsonschema:"enum=dolt,enum=bbolt"`
 }
 
 // SessionConfig holds session provider settings.

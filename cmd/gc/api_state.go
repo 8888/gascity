@@ -238,6 +238,12 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
 		}
 		return store
+	case "bbolt":
+		store, err := beads.OpenSharedBboltStore(beads.BboltStorePath(scopeRoot), beads.WithBboltStoreIDPrefix(prefix))
+		if err != nil {
+			return unavailableStore{err: fmt.Errorf("open bbolt rig store %s: %w", scopeRoot, err)}
+		}
+		return store
 	default: // "bd" or unrecognized
 		return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix)
 	}

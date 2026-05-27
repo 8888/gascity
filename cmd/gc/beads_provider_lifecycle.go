@@ -135,6 +135,10 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+	if rawBeadsProvider(cityPath) == "bbolt" {
+		clearCityDoltConfig(cityPath)
+		return startBboltBeadsLifecycle(cityPath, cfg)
+	}
 	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
 		return err
 	}
@@ -191,6 +195,33 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	return nil
 }
 
+func startBboltBeadsLifecycle(cityPath string, cfg *config.City) error {
+	if err := ensureBboltStoreScope(cityPath, config.EffectiveHQPrefix(cfg)); err != nil {
+		return fmt.Errorf("init city bbolt beads: %w", err)
+	}
+	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+			continue
+		}
+		prefix := cfg.Rigs[i].EffectivePrefix()
+		if err := ensureBboltStoreScope(resolveStoreScopeRoot(cityPath, cfg.Rigs[i].Path), prefix); err != nil {
+			return fmt.Errorf("init rig %q bbolt beads: %w", cfg.Rigs[i].Name, err)
+		}
+	}
+	if len(cfg.Rigs) > 0 {
+		allRigs := collectRigRoutes(cityPath, cfg)
+		if err := writeAllRoutes(allRigs); err != nil {
+			return fmt.Errorf("writing routes: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureBboltStoreScope(scopeRoot, prefix string) error {
+	_, err := beads.OpenSharedBboltStore(beads.BboltStorePath(scopeRoot), beads.WithBboltStoreIDPrefix(prefix))
+	return err
+}
+
 // initDirIfReady initializes beads for a single directory, ensuring the
 // backing service is ready first. For the bd provider, this is a no-op
 // (Dolt isn't running until gc start). Used by gc init and gc rig add.
@@ -198,6 +229,12 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 // Returns (deferred bool, err). deferred=true means the bd provider
 // skipped init — the caller should tell the user it's deferred to gc start.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
+	if rawBeadsProvider(cityPath) == "bbolt" {
+		if err := ensureBboltStoreScope(resolveStoreScopeRoot(cityPath, dir), prefix); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
 	provider := beadsProvider(cityPath)
 	if cityUsesBdStoreContract(cityPath) {
 		if gcDoltSkip() {
