@@ -2038,6 +2038,48 @@ func (c *City) FormulasDir() string {
 	return citylayout.FormulasRoot
 }
 
+// MergePackDirsForRig returns cityDirs followed by the pack dirs of a single
+// rig (when rigName is non-empty), or — for a render context not bound to one
+// rig (rigName == "") — followed by every rig's pack dirs with rig names
+// sorted for determinism. The result is deduplicated, city dirs first.
+//
+// This is the seam that makes rig-imported template-fragments resolvable when
+// rendering prompts. Without it the renderer sees only city-level PackDirs, so
+// a fragment defined solely in a rig-imported pack (e.g. a rig's
+// template-fragments/) is never registered and `{{ template "name" . }}`
+// references render literally. Scoping to the agent's own rig (rather than
+// concatenating all rigs unconditionally) keeps one rig's fragments from
+// shadowing another's — the cross-rig override concern raised on #2676.
+func MergePackDirsForRig(cityDirs []string, rigDirs map[string][]string, rigName string) []string {
+	dirs := appendUnique(nil, cityDirs...)
+	if rigName != "" {
+		return appendUnique(dirs, rigDirs[rigName]...)
+	}
+	rigNames := make([]string, 0, len(rigDirs))
+	for name := range rigDirs {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		dirs = appendUnique(dirs, rigDirs[name]...)
+	}
+	return dirs
+}
+
+// AllPackDirs returns city pack dirs followed by every rig's pack dirs
+// (rig names sorted), deduplicated. Use for render contexts not bound to a
+// single rig so rig-imported template-fragments remain resolvable.
+func (c *City) AllPackDirs() []string {
+	return MergePackDirsForRig(c.PackDirs, c.RigPackDirs, "")
+}
+
+// PackDirsForRig returns city pack dirs followed by the named rig's pack dirs,
+// deduplicated. An empty rigName (a city-scoped agent not bound to a single
+// rig) falls back to AllPackDirs so cross-rig fragments stay available.
+func (c *City) PackDirsForRig(rigName string) []string {
+	return MergePackDirsForRig(c.PackDirs, c.RigPackDirs, rigName)
+}
+
 // AgentDefaults provides city-level agent defaults declared via
 // [agent_defaults] in city.toml. The runtime currently applies
 // default_sling_formula and append_fragments; the remaining fields are

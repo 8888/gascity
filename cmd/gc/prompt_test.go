@@ -688,6 +688,33 @@ func TestRenderPromptCrossPackPriority(t *testing.T) {
 	}
 }
 
+// Regression for the rig-imported-pack prompt-fragment bug (cf. #2676): a
+// fragment defined only in a rig-imported pack's template-fragments/ dir must
+// resolve when that dir is included in packDirs (as the call sites now do via
+// config.MergePackDirsForRig). Without the rig dir, the {{ template }} call
+// renders literally and the agent gets a degraded prompt.
+func TestRenderPromptRigPackTemplateFragment(t *testing.T) {
+	f := fsys.NewFake()
+	// Rig-imported pack defines a named fragment at pack level (V2 layout).
+	f.Dirs["/rigpack/template-fragments"] = true
+	f.Files["/rigpack/template-fragments/propulsion.template.md"] = []byte(
+		`{{ define "propulsion-refinery" }}REFINERY DRIVE{{ end }}`)
+	f.Files["/city/agents/refinery/prompt.template.md"] = []byte(`{{ template "propulsion-refinery" . }}`)
+
+	// City dirs only: fragment is not registered → renders literally (the bug).
+	cityOnly := renderPrompt(f, "/city", "", "agents/refinery/prompt.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(cityOnly, "propulsion-refinery") {
+		t.Fatalf("expected unresolved {{ template }} when rig dir is absent, got %q", cityOnly)
+	}
+
+	// Rig dir included (as MergePackDirsForRig now yields): fragment resolves.
+	withRig := renderPrompt(f, "/city", "", "agents/refinery/prompt.template.md", PromptContext{}, "", io.Discard,
+		config.MergePackDirsForRig(nil, map[string][]string{"docnow": {"/rigpack"}}, "docnow"), nil, nil)
+	if withRig != "REFINERY DRIVE" {
+		t.Errorf("rig-pack fragment = %q, want %q", withRig, "REFINERY DRIVE")
+	}
+}
+
 func TestRenderPromptInjectFragments(t *testing.T) {
 	f := fsys.NewFake()
 	// Shared dir has named fragments.

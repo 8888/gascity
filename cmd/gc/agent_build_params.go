@@ -30,6 +30,7 @@ type agentBuildParams struct {
 	sessionTemplate string
 	beaconTime      time.Time
 	packDirs        []string
+	rigPackDirs     map[string][]string // per-rig pack dirs; merged with packDirs per agent for prompt-fragment resolution
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
 	globalFragments []string
@@ -105,6 +106,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		sessionTemplate: cfg.Workspace.SessionTemplate,
 		beaconTime:      beaconTime,
 		packDirs:        cfg.PackDirs,
+		rigPackDirs:     cfg.RigPackDirs,
 		packOverlayDirs: cfg.PackOverlayDirs,
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,
