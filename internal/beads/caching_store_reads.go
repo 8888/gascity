@@ -425,6 +425,57 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	return result, true
 }
 
+// CachedReadyStale returns ready beads from the in-memory active read model
+// WITHOUT requiring the cache to be fresh: it answers even when the periodic
+// full-scan reconcile has been failing (state == cacheDegraded) and even when
+// local writes are still awaiting reconcile confirmation (len(dirty) > 0). It is
+// a deliberately best-effort, possibly-slightly-stale view intended ONLY as a
+// last resort for controller-demand pour decisions (see
+// readyForControllerDemandQuery): the controller is the sole writer of this
+// store, so its write-through model already reflects every local mutation, which
+// makes a stale read safe for deciding whether to pour the next unit of work.
+//
+// Why this exists: when the backing managed-dolt process ages, its Ready/List
+// query latency degrades until those reads time out. If the controller-demand
+// probe goes blind on such a failure, the next ready leaf becomes invisible and
+// ALL pour/dispatch decisions freeze until the dolt process is reaped (the
+// runtime-degradation stall). Serving the last-known-good model here converts
+// that hard freeze into graceful degradation while the store recovers. The bool
+// reports whether the model is populated enough to answer at all.
+func (c *CachingStore) CachedReadyStale() ([]Bead, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	// Require a model populated by at least one prior successful load; without
+	// that there is nothing trustworthy to serve.
+	if c.lastFreshAt.IsZero() || len(c.beads) == 0 {
+		return nil, false
+	}
+	statusByID := make(map[string]string, len(c.beads))
+	openBeads := make([]Bead, 0, len(c.beads))
+	for _, b := range c.beads {
+		statusByID[b.ID] = b.Status
+		if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
+			openBeads = append(openBeads, cloneBead(b))
+		}
+	}
+	result := make([]Bead, 0, len(openBeads))
+	for _, b := range openBeads {
+		deps, ok := c.deps[b.ID]
+		if !ok && !c.depsComplete {
+			// Dependencies for this bead are unknown and the dep cache is not
+			// known-complete. Be conservative and SKIP this bead rather than
+			// risk pouring a leaf whose blockers we cannot see. (CachedReady
+			// bails out entirely in this case; for the stale fallback we drop
+			// only the uncertain bead so the rest can still be poured.)
+			continue
+		}
+		if cachedBeadReady(statusByID, deps) {
+			result = append(result, cloneBead(b))
+		}
+	}
+	return result, true
+}
+
 func cachedBeadReady(statusByID map[string]string, deps []Dep) bool {
 	for _, dep := range deps {
 		switch dep.Type {

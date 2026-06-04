@@ -1244,7 +1244,27 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 			return filterReadyForControllerDemand(ready, query), nil
 		}
 	}
-	return store.Ready(query)
+	ready, err := store.Ready(query)
+	if err == nil {
+		return ready, nil
+	}
+	// The live store query failed — e.g. the backing managed-dolt process's
+	// query latency has degraded with age and the read timed out. Going blind
+	// here makes the next ready leaf invisible to the controller, which freezes
+	// ALL pour/dispatch decisions until the dolt process is reaped (the runtime-
+	// degradation stall). Fall back to the last-known-good in-memory read model:
+	// the controller is the sole writer, so its write-through cache is a safe,
+	// slightly-stale source for a pour decision and is strictly better than a
+	// hard stall. (Healthy operation never reaches here: a live cache answers via
+	// CachedReady above, and a healthy backing answers without error.)
+	if degraded, ok := store.(interface {
+		CachedReadyStale() ([]beads.Bead, bool)
+	}); ok {
+		if stale, ok := degraded.CachedReadyStale(); ok {
+			return filterReadyForControllerDemand(stale, query), nil
+		}
+	}
+	return ready, err
 }
 
 func filterReadyForControllerDemand(ready []beads.Bead, query beads.ReadyQuery) []beads.Bead {
